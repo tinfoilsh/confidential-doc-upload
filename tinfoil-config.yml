@@ -1,0 +1,16 @@
+cvm-version: 0.0.32
+ovmf-version: 0.0.2
+cpus: 8
+memory: 40960
+
+shim:
+  domains:
+    - doc-upload.model.tinfoil.sh
+  listen-port: 443
+  upstream-port: 5001
+  origins:
+    - https://tinfoil.sh
+
+containers:
+  - name: "doc-upload"
+    image: "ghcr.io/docling-project/docling-serve-cu124"
