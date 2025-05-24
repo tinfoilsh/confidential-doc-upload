@@ -1,4 +1,4 @@
-cvm-version: 0.0.32
+cvm-version: 0.0.33
 ovmf-version: 0.0.2
 cpus: 8
 memory: 40960
@@ -14,4 +14,5 @@ shim:
 
 containers:
   - name: "doc-upload"
-    image: "ghcr.io/docling-project/docling-serve-cu124"
+    args:
+      - "--gpus all"
