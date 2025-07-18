@@ -15,10 +15,10 @@ shim:
     - http://localhost:3000
   paths:
     - /health
-    - /v1alpha/convert/file
+    - /v1/convert/file
 
 containers:
   - name: "doc-upload"
-    image: "ghcr.io/docling-project/docling-serve-cu124"
+    image: "ghcr.io/docling-project/docling-serve-cu124:v1.0.0"
     args:
       - "--gpus all"
