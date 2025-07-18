@@ -13,6 +13,9 @@ shim:
     - https://tinfoil.sh
     - https://chat.tinfoil.sh
     - http://localhost:3000
+  paths:
+    - /health
+    - /v1alpha/convert/file
 
 containers:
   - name: "doc-upload"
