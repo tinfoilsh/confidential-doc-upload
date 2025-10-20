@@ -1,4 +1,4 @@
-shim-version: v0.1.1@sha256:fcd0ba0ea3f0ca26d92595ea90f28308cfba819e3243925892e6c8f21eb1397d
+shim-version: v0.1.9@sha256:410510c9e8e4c7489dd201fede302dee8455075ca28f4f0abbf84bded943b8f1
 cvm-version: 0.1.3
 ovmf-version: 0.0.2
 cpus: 8
@@ -9,10 +9,6 @@ shim:
   upstream-port: 5001
   publish-attestation: true
   tls-challenge: dns
-  origins:
-    - https://tinfoil.sh
-    - https://chat.tinfoil.sh
-    - http://localhost:3000
   paths:
     - /health
     - /v1/convert/file
