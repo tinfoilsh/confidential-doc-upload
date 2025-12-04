@@ -1,9 +1,8 @@
-shim-version: v0.2.10@sha256:f9040a48106ab06c290fd9b225d4dd53a2daad715c9107594d4310b21592039f
-cvm-version: 0.5.7
+shim-version: v0.2.15@sha256:5ca748b384b78b7e686b57ca66d9b3c552038ebab2ce60305004f76e573a8458
+cvm-version: 0.5.8
 cpus: 16
 memory: 65536
 gpus: full
-vllm: false
 
 containers:
   - name: "doc-upload"
@@ -14,7 +13,7 @@ containers:
 shim:
   listen-port: 443
   upstream-port: 5001
-  publish-attestation: false
+  publish-attestation: true
   tls-challenge: dns
   control-plane: https://api.tinfoil.sh
   paths:
