@@ -1,5 +1,5 @@
-shim-version: v0.2.15@sha256:5ca748b384b78b7e686b57ca66d9b3c552038ebab2ce60305004f76e573a8458
-cvm-version: 0.5.8
+shim-version: v0.3.16@sha256:20220be4487f241e7e2a9af6dd576d20ba35d71307bd777c8dba9ba5da03fb38
+cvm-version: 0.6.7
 cpus: 16
 memory: 65536
 gpus: full
@@ -13,9 +13,7 @@ containers:
 shim:
   listen-port: 443
   upstream-port: 5001
-  publish-attestation: true
-  tls-challenge: dns
-  control-plane: https://api.tinfoil.sh
+  authenticated: true
   paths:
     - /health
     - /v1/convert/file
