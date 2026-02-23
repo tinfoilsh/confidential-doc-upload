@@ -5,7 +5,7 @@ memory: 65536
 
 containers:
   - name: "doc-upload"
-    image: "ghcr.io/docling-project/docling-serve-cu128:v1.13.1@sha256:67d804145d2447b1a52be6db2c13acabe164c86c12d89e67c7e6517bb806c5e6"
+    image: "ghcr.io/docling-project/docling-serve-cu130:v1.13.1@sha256:df1884e71573e36401eaedff6abbec875e026e522ac0e0e9854c77ee036e4df6"
     runtime: nvidia
     gpus: all
 
