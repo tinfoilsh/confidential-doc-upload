@@ -6,7 +6,7 @@ gpus: full
 
 containers:
   - name: "doc-upload"
-    image: "ghcr.io/docling-project/docling-serve-cu128:v1.8.0@sha256:ed9747dc6b6c794edd9a7e4087151a8bcc8cea29ad066851a541880760de2650"
+    image: "ghcr.io/docling-project/docling-serve-cu128:v1.13.1@sha256:67d804145d2447b1a52be6db2c13acabe164c86c12d89e67c7e6517bb806c5e6"
     args:
       - "--gpus all"
 
