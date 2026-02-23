@@ -6,8 +6,8 @@ memory: 65536
 containers:
   - name: "doc-upload"
     image: "ghcr.io/docling-project/docling-serve-cu128:v1.13.1@sha256:67d804145d2447b1a52be6db2c13acabe164c86c12d89e67c7e6517bb806c5e6"
-    args:
-      - "--gpus all"
+    runtime: nvidia
+    gpus: all
 
 shim:
   listen-port: 443
