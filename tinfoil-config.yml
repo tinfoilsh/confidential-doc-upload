@@ -1,8 +1,7 @@
-shim-version: v0.3.16@sha256:20220be4487f241e7e2a9af6dd576d20ba35d71307bd777c8dba9ba5da03fb38
-cvm-version: 0.6.7
-cpus: 16
+cvm-version: 0.7.3
 memory: 65536
-gpus: full
+cpus: 16
+gpus: 1
 
 containers:
   - name: "doc-upload"
@@ -11,9 +10,10 @@ containers:
       - "--gpus all"
 
 shim:
-  listen-port: 443
   upstream-port: 5001
   authenticated: true
+  authenticated-endpoints:
+    - /v1/convert/file
   paths:
     - /health
     - /v1/convert/file
