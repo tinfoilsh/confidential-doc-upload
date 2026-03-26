@@ -4,9 +4,15 @@ memory: 65536
 
 containers:
   - name: "doc-upload"
-    image: "ghcr.io/docling-project/docling-serve-cu130:v1.13.1@sha256:df1884e71573e36401eaedff6abbec875e026e522ac0e0e9854c77ee036e4df6"
+    image: "ghcr.io/docling-project/docling-serve-cu130:v1.15.0@sha256:5a80f051275c482bf59af22179bc19c5682febe9a5e2db7fb75c8e88030f9111"
     runtime: nvidia
     gpus: all
+    env:
+      - DOCLING_SERVE_MAX_FILE_SIZE: "52428800"
+      - DOCLING_SERVE_MAX_NUM_PAGES: "200"
+      - DOCLING_SERVE_MAX_SYNC_WAIT: "300"
+      - DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "1"
+      - DOCLING_SERVE_QUEUE_MAX_SIZE: "5"
 
 shim:
   upstream-port: 5001
@@ -15,4 +21,5 @@ shim:
     - /v1/convert/file
   paths:
     - /health
+    - /metrics
     - /v1/convert/file
