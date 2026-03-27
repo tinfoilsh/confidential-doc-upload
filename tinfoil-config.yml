@@ -12,7 +12,7 @@ containers:
     image: "ghcr.io/tinfoilsh/doc-upload-router:latest"
     env:
       - DOCLING_URL: "http://localhost:5001"
-      - VLLM_URL: "http://localhost:8000/v1/chat/completions"
+      - VLLM_URL: "http://localhost:8000"
       - VLLM_MODEL: "Qwen/Qwen3-VL-2B-Instruct"
       - CHUNK_PAGES: "3"
       - SPLIT_THRESHOLD: "2"
@@ -58,5 +58,9 @@ shim:
     - /v1/convert/file
   paths:
     - /health
+    - /health/docling
+    - /health/vllm
     - /metrics
+    - /metrics/docling
+    - /metrics/vllm
     - /v1/convert/file
