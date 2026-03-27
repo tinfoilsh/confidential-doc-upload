@@ -15,7 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"sync/atomic"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -30,7 +31,8 @@ var (
 	maxFileMB  = envInt("MAX_FILE_SIZE_MB", 50)
 	maxChunks  = envInt("MAX_CONCURRENT_CHUNKS", 32)
 
-	chunkSem chan struct{}
+	reqCounter atomic.Int64
+	chunkSem   chan struct{}
 
 	httpClient = &http.Client{
 		Timeout: 10 * time.Minute,
@@ -129,7 +131,7 @@ func vlmPipelineConfig() string {
 }
 
 func handleConvert(w http.ResponseWriter, r *http.Request) {
-	reqID := uuid.New().String()[:8]
+	reqID := strconv.FormatInt(reqCounter.Add(1), 10)
 	activeReqs.Inc()
 	defer activeReqs.Dec()
 	t0 := time.Now()
