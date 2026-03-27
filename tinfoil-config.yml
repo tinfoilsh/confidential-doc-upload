@@ -2,20 +2,57 @@ cvm-version: 0.7.3
 cpus: 16
 memory: 65536
 
+models:
+  - name: "qwen3-vl-2b"
+    repo: "Qwen/Qwen3-VL-2B-Instruct@89644892e4d85e24eaac8bacfd4f463576704203"
+    mpk: "a412c000abe47ec3487c8323339fbc015e6c5f034c2bb0f26bc0a8b5104bfead_4266655744_41f586ac-2939-5c74-b5ac-b42a13badbd6"
+
 containers:
+  - name: "doc-upload-router"
+    image: "ghcr.io/tinfoilsh/doc-upload-router:latest"
+    env:
+      - DOCLING_URL: "http://localhost:5001"
+      - VLLM_URL: "http://localhost:8000/v1/chat/completions"
+      - VLLM_MODEL: "Qwen/Qwen3-VL-2B-Instruct"
+      - CHUNK_PAGES: "3"
+      - SPLIT_THRESHOLD: "2"
+
   - name: "doc-upload"
     image: "ghcr.io/docling-project/docling-serve-cu130:v1.15.0@sha256:5a80f051275c482bf59af22179bc19c5682febe9a5e2db7fb75c8e88030f9111"
     runtime: nvidia
     gpus: all
     env:
+      - UVICORN_WORKERS: "8"
+      - DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "1"
       - DOCLING_SERVE_MAX_FILE_SIZE: "52428800"
       - DOCLING_SERVE_MAX_NUM_PAGES: "200"
       - DOCLING_SERVE_MAX_SYNC_WAIT: "300"
-      - DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "1"
-      - DOCLING_SERVE_QUEUE_MAX_SIZE: "5"
+      - DOCLING_SERVE_QUEUE_MAX_SIZE: "10"
+      - DOCLING_SERVE_LAYOUT_BATCH_SIZE: "32"
+      - DOCLING_SERVE_TABLE_BATCH_SIZE: "32"
+      - DOCLING_SERVE_OCR_BATCH_SIZE: "32"
+      - DOCLING_PERF_PAGE_BATCH_SIZE: "64"
+      - DOCLING_SERVE_ENABLE_REMOTE_SERVICES: "true"
+      - DOCLING_SERVE_ALLOW_CUSTOM_VLM_CONFIG: "true"
+      - DOCLING_SERVE_ALLOW_CUSTOM_PICTURE_DESCRIPTION_CONFIG: "true"
+      - OMP_NUM_THREADS: "2"
+
+  - name: "vllm-qwen3-vl"
+    image: "vllm/vllm-openai:v0.18.0-cu130@sha256:9951d6e8f54921a5c80b1b106aa67d495bdaf19d139bd1a8d34d42da747df2d5"
+    runtime: nvidia
+    gpus: all
+    command: [
+      "--model", "/tinfoil/mpk/mpk-a412c000abe47ec3487c8323339fbc015e6c5f034c2bb0f26bc0a8b5104bfead",
+      "--served-model-name", "Qwen/Qwen3-VL-2B-Instruct",
+      "--host", "0.0.0.0",
+      "--port", "8000",
+      "--max-num-seqs", "64",
+      "--gpu-memory-utilization", "0.3",
+      "--trust-remote-code"
+    ]
 
 shim:
-  upstream-port: 5001
+  upstream-port: 5000
   authenticated: true
   authenticated-endpoints:
     - /v1/convert/file
