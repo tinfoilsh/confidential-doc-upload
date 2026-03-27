@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"math/bits"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -15,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -23,7 +23,7 @@ import (
 
 var (
 	doclingURL = envOr("DOCLING_URL", "http://localhost:5001")
-	vllmURL    = envOr("VLLM_URL", "http://localhost:8000/v1/chat/completions")
+	vllmURL    = envOr("VLLM_URL", "http://localhost:8000")
 	vllmModel  = envOr("VLLM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
 	listenAddr = envOr("ROUTER_PORT", "5000")
 	chunkPages = envInt("CHUNK_PAGES", 3)
@@ -31,7 +31,6 @@ var (
 	maxFileMB  = envInt("MAX_FILE_SIZE_MB", 50)
 	maxChunks  = envInt("MAX_CONCURRENT_CHUNKS", 32)
 
-	reqCounter atomic.Int64
 	chunkSem   chan struct{}
 
 	httpClient = &http.Client{
@@ -45,18 +44,35 @@ var (
 
 	reqTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "router_requests_total",
+		Help: "Total requests by PDF type and routing strategy.",
 	}, []string{"pdf_type", "strategy"})
 	reqDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "router_request_duration_seconds",
+		Help:    "End-to-end request duration including all chunk processing.",
 		Buckets: prometheus.ExponentialBuckets(0.1, 2, 12),
 	}, []string{"pdf_type", "strategy"})
 	activeReqs = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "router_active_requests",
+		Help: "Number of requests currently being processed.",
 	})
+	docSizeBytes = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "router_document_size_bytes",
+		Help:    "Uploaded document size in bytes.",
+		Buckets: prometheus.ExponentialBuckets(1024, 4, 10), // 1KB to 256MB
+	}, []string{"pdf_type"})
+	docPages = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "router_document_pages",
+		Help:    "Number of pages in uploaded documents (coarse buckets).",
+		Buckets: []float64{1, 10, 50, 100, 500, 1000},
+	}, []string{"pdf_type"})
+	reqErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "router_errors_total",
+		Help: "Total errors by type.",
+	}, []string{"error_type"})
 )
 
 func init() {
-	prometheus.MustRegister(reqTotal, reqDuration, activeReqs)
+	prometheus.MustRegister(reqTotal, reqDuration, activeReqs, docSizeBytes, docPages, reqErrors)
 	chunkSem = make(chan struct{}, maxChunks)
 }
 
@@ -67,10 +83,31 @@ const (
 	pdfScanned     pdfType = "scanned"
 )
 
+func proxyTo(target string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		resp, err := http.Get(target)
+		if err != nil {
+			http.Error(w, "backend unavailable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	}
+}
+
 func main() {
 	mux := http.NewServeMux()
+
 	mux.HandleFunc("GET /health", handleHealth)
+	mux.HandleFunc("GET /health/docling", proxyTo(doclingURL+"/health"))
+	mux.HandleFunc("GET /health/vllm", proxyTo(vllmURL+"/health"))
+
 	mux.Handle("GET /metrics", promhttp.Handler())
+	mux.HandleFunc("GET /metrics/docling", proxyTo(doclingURL+"/metrics"))
+	mux.HandleFunc("GET /metrics/vllm", proxyTo(vllmURL+"/metrics"))
+
 	mux.HandleFunc("POST /v1/convert/file", handleConvert)
 
 	slog.Info("router starting", "addr", ":"+listenAddr, "docling", doclingURL, "vllm", vllmURL)
@@ -82,7 +119,7 @@ func main() {
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	dOK := checkHealth(doclingURL + "/health")
-	vOK := checkHealth(strings.Replace(vllmURL, "/v1/chat/completions", "/health", 1))
+	vOK := checkHealth(vllmURL + "/health")
 	status := "ok"
 	if !dOK {
 		status = "degraded"
@@ -96,7 +133,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 // picDescConfig returns the picture_description_api JSON for VLM figure enrichment.
 func picDescConfig() string {
 	cfg := map[string]any{
-		"url":         vllmURL,
+		"url":         vllmURL + "/v1/chat/completions",
 		"params":      map[string]any{"model": vllmModel, "max_completion_tokens": 1000},
 		"timeout":     60.0,
 		"concurrency": 8,
@@ -111,8 +148,8 @@ func vlmPipelineConfig() string {
 	cfg := map[string]any{
 		"engine_options": map[string]any{
 			"engine_type": "api",
-			"url":         vllmURL,
-			"params":      map[string]any{"model": vllmModel, "max_tokens": 4096},
+			"url":         vllmURL + "/v1/chat/completions",
+			"params":      map[string]any{"model": vllmModel, "max_tokens": 16384},
 			"timeout":     120.0,
 			"concurrency": 16,
 		},
@@ -121,7 +158,7 @@ func vlmPipelineConfig() string {
 			"default_repo_id": vllmModel,
 			"prompt":          "Convert this page to markdown. Do not miss any text and only output the bare markdown!",
 			"response_format": "markdown",
-			"max_new_tokens":  4096,
+			"max_new_tokens":  16384,
 		},
 		"scale":      2.0,
 		"batch_size": 1,
@@ -131,7 +168,6 @@ func vlmPipelineConfig() string {
 }
 
 func handleConvert(w http.ResponseWriter, r *http.Request) {
-	reqID := strconv.FormatInt(reqCounter.Add(1), 10)
 	activeReqs.Inc()
 	defer activeReqs.Dec()
 	t0 := time.Now()
@@ -139,7 +175,7 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	ct := r.Header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(ct)
 	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
-		httpErr(w, reqID, http.StatusBadRequest, "expected multipart/form-data")
+		httpErr(w, http.StatusBadRequest, "expected multipart/form-data")
 		return
 	}
 
@@ -154,7 +190,7 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if err != nil {
-			httpErr(w, reqID, http.StatusBadRequest, "failed to parse multipart")
+			httpErr(w, http.StatusBadRequest, "failed to parse multipart")
 			return
 		}
 		name := part.FormName()
@@ -167,7 +203,7 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 			data, err := io.ReadAll(io.LimitReader(part, int64(maxFileMB)*1024*1024+1))
 			part.Close()
 			if err != nil || len(data) > maxFileMB*1024*1024 {
-				httpErr(w, reqID, http.StatusRequestEntityTooLarge,
+				httpErr(w, http.StatusRequestEntityTooLarge,
 					fmt.Sprintf("file exceeds %dMB limit", maxFileMB))
 				return
 			}
@@ -180,7 +216,7 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if pdfData == nil {
-		httpErr(w, reqID, http.StatusBadRequest, "no file uploaded")
+		httpErr(w, http.StatusBadRequest, "no file uploaded")
 		return
 	}
 
@@ -188,11 +224,10 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	if hasField(clientFields, "pipeline") || hasField(clientFields, "do_ocr") {
 		body, _, err := postMultipartStreaming(pdfData, pdfFilename, clientFields)
 		if err != nil {
-			httpErr(w, reqID, http.StatusBadGateway, "backend error")
+			httpErr(w, http.StatusBadGateway, "backend error")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Request-ID", reqID)
 		w.Write(body)
 		return
 	}
@@ -232,9 +267,11 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	shouldSplit := pages > splitMin
 
 	slog.Info("request",
-		"req", reqID, "type", pt, "pages", pages,
+		"type", pt, "pages", pages,
 		"strategy", strategy, "split", shouldSplit)
 	reqTotal.WithLabelValues(string(pt), strategy).Inc()
+	docSizeBytes.WithLabelValues(string(pt)).Observe(float64(nextPow2(len(pdfData))))
+	docPages.WithLabelValues(string(pt)).Observe(float64(pages))
 
 	if shouldSplit {
 		nChunks := int(math.Ceil(float64(pages) / float64(chunkPages)))
@@ -275,12 +312,12 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 		var mds []string
 		for _, cr := range results {
 			if cr.err != nil {
-				httpErr(w, reqID, http.StatusBadGateway, "chunk processing failed")
+				httpErr(w, http.StatusBadGateway, "chunk processing failed")
 				return
 			}
 			var resp doclingResponse
 			if err := json.Unmarshal(cr.body, &resp); err != nil {
-				httpErr(w, reqID, http.StatusBadGateway, "invalid chunk response")
+				httpErr(w, http.StatusBadGateway, "invalid chunk response")
 				return
 			}
 			mds = append(mds, resp.Document.MDContent)
@@ -302,12 +339,11 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Router-Type", string(pt))
 		w.Header().Set("X-Router-Strategy", strategy)
 		w.Header().Set("X-Router-Chunks", strconv.Itoa(nChunks))
-		w.Header().Set("X-Request-ID", reqID)
 		json.NewEncoder(w).Encode(merged)
 	} else {
 		body, _, err := postMultipartStreaming(pdfData, pdfFilename, allFields)
 		if err != nil {
-			httpErr(w, reqID, http.StatusBadGateway, "backend error")
+			httpErr(w, http.StatusBadGateway, "backend error")
 			return
 		}
 
@@ -317,7 +353,6 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Router-Type", string(pt))
 		w.Header().Set("X-Router-Strategy", strategy)
-		w.Header().Set("X-Request-ID", reqID)
 		w.Write(body)
 	}
 }
@@ -332,10 +367,10 @@ func checkHealth(url string) bool {
 	return resp.StatusCode == 200
 }
 
-func httpErr(w http.ResponseWriter, reqID string, code int, msg string) {
-	slog.Error("request error", "req", reqID, "code", code, "msg", msg)
+func httpErr(w http.ResponseWriter, code int, msg string) {
+	slog.Error("request error", "code", code, "msg", msg)
+	reqErrors.WithLabelValues(strconv.Itoa(code)).Inc()
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Request-ID", reqID)
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
@@ -368,6 +403,13 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func nextPow2(n int) int {
+	if n <= 1 {
+		return 1
+	}
+	return 1 << bits.Len(uint(n-1))
 }
 
 func envInt(key string, def int) int {
