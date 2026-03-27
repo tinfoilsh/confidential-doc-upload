@@ -1,14 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
-	"time"
 )
 
-func postMultipartStreaming(pdfData []byte, filename string, fields []fieldPair) ([]byte, int64, error) {
+func postMultipartStreaming(ctx context.Context, pdfData []byte, filename string, fields []fieldPair) ([]byte, error) {
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)
 
@@ -33,22 +33,30 @@ func postMultipartStreaming(pdfData []byte, filename string, fields []fieldPair)
 		}
 	}()
 
-	req, err := http.NewRequest("POST", doclingURL+"/v1/convert/file", pr)
+	req, err := http.NewRequestWithContext(ctx, "POST", doclingURL+"/v1/convert/file", pr)
 	if err != nil {
 		pr.Close()
-		return nil, 0, err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.ContentLength = -1
 
-	tPost := time.Now()
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("docling request failed: %w", err)
+		return nil, fmt.Errorf("docling request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
-	postMs := time.Since(tPost).Milliseconds()
-	return body, postMs, err
+	if err != nil {
+		return nil, fmt.Errorf("reading docling response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		detail := string(body)
+		if len(detail) > 512 {
+			detail = detail[:512] + "..."
+		}
+		return nil, fmt.Errorf("docling returned %d: %s", resp.StatusCode, detail)
+	}
+	return body, nil
 }

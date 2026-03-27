@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"regexp"
 	"strconv"
 )
@@ -27,6 +26,9 @@ var (
 
 	// /Count N in the page tree root gives total page count (spec §7.7.3).
 	pageCountRe = regexp.MustCompile(`/Count\s+(\d+)`)
+
+	// /Type /Page but NOT /Type /Pages — matches individual page objects.
+	pageObjRe = regexp.MustCompile(`/Type\s*/Page[^s]`)
 )
 
 // classifyPDFRaw determines if a PDF is born-digital (has embedded fonts),
@@ -72,7 +74,5 @@ func extractPageCount(data []byte) int {
 	if maxCount > 0 {
 		return maxCount
 	}
-	// Fallback: count individual page object declarations
-	return bytes.Count(data, []byte("/Type /Page")) +
-		bytes.Count(data, []byte("/Type/Page"))
+	return len(pageObjRe.FindAll(data, -1))
 }
