@@ -45,6 +45,7 @@ var (
 		"page_range":               true,
 		"from_format":              true,
 		"to_format":                true,
+		"image_export_mode":        true,
 	}
 
 	chunkSem   chan struct{}
@@ -329,6 +330,10 @@ func convertFile(ctx context.Context, f uploadedFile, clientFields []fieldPair, 
 	pt, pages := classifyPDFRaw(f.data)
 	docSizeBytes.WithLabelValues(string(pt)).Observe(float64(nextPow2(len(f.data))))
 	docPages.WithLabelValues(string(pt)).Observe(float64(pages))
+
+	if !hasField(clientFields, "image_export_mode") {
+		clientFields = append(clientFields, fieldPair{"image_export_mode", "placeholder"})
+	}
 
 	// If client set pipeline or do_ocr, respect their choice
 	if hasField(clientFields, "pipeline") || hasField(clientFields, "do_ocr") {
