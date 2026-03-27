@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -85,7 +86,12 @@ const (
 
 func proxyTo(target string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		resp, err := http.Get(target)
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, target, nil)
+		if err != nil {
+			http.Error(w, "failed to create request", http.StatusInternalServerError)
+			return
+		}
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			http.Error(w, "backend unavailable", http.StatusBadGateway)
 			return
@@ -167,10 +173,16 @@ func vlmPipelineConfig() string {
 	return string(b)
 }
 
+type uploadedFile struct {
+	filename string
+	data     []byte
+}
+
 func handleConvert(w http.ResponseWriter, r *http.Request) {
 	activeReqs.Inc()
 	defer activeReqs.Dec()
 	t0 := time.Now()
+	ctx := r.Context()
 
 	ct := r.Header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(ct)
@@ -180,8 +192,7 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reader := multipart.NewReader(r.Body, params["boundary"])
-	var pdfData []byte
-	var pdfFilename string
+	var files []uploadedFile
 	var clientFields []fieldPair
 
 	for {
@@ -195,19 +206,15 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 		}
 		name := part.FormName()
 		if name == "files" {
-			if pdfData != nil {
-				part.Close()
-				continue
-			}
-			pdfFilename = part.FileName()
+			filename := part.FileName()
 			data, err := io.ReadAll(io.LimitReader(part, int64(maxFileMB)*1024*1024+1))
 			part.Close()
 			if err != nil || len(data) > maxFileMB*1024*1024 {
 				httpErr(w, http.StatusRequestEntityTooLarge,
-					fmt.Sprintf("file exceeds %dMB limit", maxFileMB))
+					fmt.Sprintf("file %q exceeds %dMB limit", filename, maxFileMB))
 				return
 			}
-			pdfData = data
+			files = append(files, uploadedFile{filename, data})
 		} else {
 			val, _ := io.ReadAll(io.LimitReader(part, 1024*1024))
 			part.Close()
@@ -215,32 +222,81 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if pdfData == nil {
+	if len(files) == 0 {
 		httpErr(w, http.StatusBadRequest, "no file uploaded")
 		return
 	}
 
-	// If client set pipeline or do_ocr, respect their choice
-	if hasField(clientFields, "pipeline") || hasField(clientFields, "do_ocr") {
-		body, _, err := postMultipartStreaming(pdfData, pdfFilename, clientFields)
+	describeImages := r.URL.Query().Get("describe_images") == "true"
+
+	type fileResult struct {
+		body     []byte
+		pt       pdfType
+		strategy string
+	}
+	results := make([]fileResult, 0, len(files))
+	for _, f := range files {
+		body, pt, strategy, err := convertFile(ctx, f, clientFields, describeImages)
 		if err != nil {
-			httpErr(w, http.StatusBadGateway, "backend error")
+			httpErr(w, http.StatusBadGateway, err.Error())
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
+		results = append(results, fileResult{body, pt, strategy})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	if len(results) == 1 {
+		res := results[0]
+		w.Header().Set("X-Router-Type", string(res.pt))
+		w.Header().Set("X-Router-Strategy", res.strategy)
+		w.Write(res.body)
 		return
 	}
 
-	pt, pages := classifyPDFRaw(pdfData)
+	elapsed := time.Since(t0).Seconds()
+	var docs []doclingDocument
+	for i, res := range results {
+		var resp doclingResponse
+		if err := json.Unmarshal(res.body, &resp); err != nil {
+			httpErr(w, http.StatusBadGateway,
+				fmt.Sprintf("invalid response for file %d", i))
+			return
+		}
+		docs = append(docs, resp.Document)
+	}
+	w.Header().Set("X-Router-Files", strconv.Itoa(len(files)))
+	json.NewEncoder(w).Encode(multiDocResponse{
+		Documents:      docs,
+		Status:         "success",
+		ProcessingTime: elapsed,
+	})
+}
+
+func convertFile(ctx context.Context, f uploadedFile, clientFields []fieldPair, describeImages bool) (body []byte, pt pdfType, strategy string, err error) {
+	t0 := time.Now()
+	defer func() {
+		if err == nil {
+			reqDuration.WithLabelValues(string(pt), strategy).Observe(time.Since(t0).Seconds())
+		}
+	}()
+
+	pt, pages := classifyPDFRaw(f.data)
+	docSizeBytes.WithLabelValues(string(pt)).Observe(float64(nextPow2(len(f.data))))
+	docPages.WithLabelValues(string(pt)).Observe(float64(pages))
+
+	// If client set pipeline or do_ocr, respect their choice
+	if hasField(clientFields, "pipeline") || hasField(clientFields, "do_ocr") {
+		strategy = "client_override"
+		reqTotal.WithLabelValues(string(pt), strategy).Inc()
+		body, err = postMultipartStreaming(ctx, f.data, f.filename, clientFields)
+		return
+	}
 
 	// Two paths:
 	//   born_digital → standard pipeline, no OCR, VLM describes figures
 	//   scanned      → VLM pipeline (reads page images directly)
-	var strategy string
 	var routeFields []fieldPair
-
-	describeImages := r.URL.Query().Get("describe_images") == "true"
 
 	if pt == pdfBornDigital {
 		strategy = "standard"
@@ -266,95 +322,97 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	allFields := append(clientFields, routeFields...)
 	shouldSplit := pages > splitMin
 
-	slog.Info("request",
-		"type", pt, "pages", pages,
+	slog.Info("processing file",
+		"filename", f.filename, "type", pt, "pages", pages,
 		"strategy", strategy, "split", shouldSplit)
 	reqTotal.WithLabelValues(string(pt), strategy).Inc()
-	docSizeBytes.WithLabelValues(string(pt)).Observe(float64(nextPow2(len(pdfData))))
-	docPages.WithLabelValues(string(pt)).Observe(float64(pages))
 
-	if shouldSplit {
-		nChunks := int(math.Ceil(float64(pages) / float64(chunkPages)))
-		type chunkResult struct {
-			idx  int
-			body []byte
-			err  error
-		}
-		results := make([]chunkResult, nChunks)
-		var wg sync.WaitGroup
-
-		for i := 0; i < nChunks; i++ {
-			wg.Add(1)
-			go func(idx int) {
-				defer wg.Done()
-				chunkSem <- struct{}{}
-				defer func() { <-chunkSem }()
-
-				start := idx*chunkPages + 1
-				end := (idx + 1) * chunkPages
-				if end > pages {
-					end = pages
-				}
-
-				chunkFields := make([]fieldPair, len(allFields), len(allFields)+2)
-				copy(chunkFields, allFields)
-				chunkFields = append(chunkFields,
-					fieldPair{"page_range", strconv.Itoa(start)},
-					fieldPair{"page_range", strconv.Itoa(end)},
-				)
-
-				body, _, err := postMultipartStreaming(pdfData, pdfFilename, chunkFields)
-				results[idx] = chunkResult{idx, body, err}
-			}(i)
-		}
-		wg.Wait()
-
-		var mds []string
-		for _, cr := range results {
-			if cr.err != nil {
-				httpErr(w, http.StatusBadGateway, "chunk processing failed")
-				return
-			}
-			var resp doclingResponse
-			if err := json.Unmarshal(cr.body, &resp); err != nil {
-				httpErr(w, http.StatusBadGateway, "invalid chunk response")
-				return
-			}
-			mds = append(mds, resp.Document.MDContent)
-		}
-
-		merged := doclingResponse{
-			Document: doclingDocument{
-				Filename:  pdfFilename,
-				MDContent: strings.Join(mds, "\n\n"),
-			},
-			Status:         "success",
-			ProcessingTime: time.Since(t0).Seconds(),
-		}
-
-		elapsed := time.Since(t0).Seconds()
-		reqDuration.WithLabelValues(string(pt), strategy).Observe(elapsed)
-
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Router-Type", string(pt))
-		w.Header().Set("X-Router-Strategy", strategy)
-		w.Header().Set("X-Router-Chunks", strconv.Itoa(nChunks))
-		json.NewEncoder(w).Encode(merged)
-	} else {
-		body, _, err := postMultipartStreaming(pdfData, pdfFilename, allFields)
-		if err != nil {
-			httpErr(w, http.StatusBadGateway, "backend error")
-			return
-		}
-
-		elapsed := time.Since(t0).Seconds()
-		reqDuration.WithLabelValues(string(pt), strategy).Observe(elapsed)
-
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Router-Type", string(pt))
-		w.Header().Set("X-Router-Strategy", strategy)
-		w.Write(body)
+	if !shouldSplit {
+		body, err = postMultipartStreaming(ctx, f.data, f.filename, allFields)
+		return
 	}
+
+	var doc doclingDocument
+	doc, err = convertChunked(ctx, f, allFields, pages)
+	if err != nil {
+		return
+	}
+	merged := doclingResponse{
+		Document:       doc,
+		Status:         "success",
+		ProcessingTime: time.Since(t0).Seconds(),
+	}
+	body, err = json.Marshal(merged)
+	return
+}
+
+func convertChunked(ctx context.Context, f uploadedFile, allFields []fieldPair, pages int) (doclingDocument, error) {
+	nChunks := int(math.Ceil(float64(pages) / float64(chunkPages)))
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type chunkResult struct {
+		idx  int
+		body []byte
+		err  error
+	}
+	results := make([]chunkResult, nChunks)
+	var wg sync.WaitGroup
+
+	for i := 0; i < nChunks; i++ {
+		select {
+		case chunkSem <- struct{}{}:
+		case <-ctx.Done():
+			results[i] = chunkResult{i, nil, ctx.Err()}
+			break
+		}
+		if ctx.Err() != nil {
+			break
+		}
+
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			defer func() { <-chunkSem }()
+
+			start := idx*chunkPages + 1
+			end := (idx + 1) * chunkPages
+			if end > pages {
+				end = pages
+			}
+
+			chunkFields := make([]fieldPair, len(allFields), len(allFields)+2)
+			copy(chunkFields, allFields)
+			chunkFields = append(chunkFields,
+				fieldPair{"page_range", strconv.Itoa(start)},
+				fieldPair{"page_range", strconv.Itoa(end)},
+			)
+
+			body, err := postMultipartStreaming(ctx, f.data, f.filename, chunkFields)
+			if err != nil {
+				cancel()
+			}
+			results[idx] = chunkResult{idx, body, err}
+		}(i)
+	}
+	wg.Wait()
+
+	var mds []string
+	for _, cr := range results {
+		if cr.err != nil {
+			return doclingDocument{}, fmt.Errorf("chunk %d: %w", cr.idx, cr.err)
+		}
+		var resp doclingResponse
+		if err := json.Unmarshal(cr.body, &resp); err != nil {
+			return doclingDocument{}, fmt.Errorf("chunk %d: invalid response", cr.idx)
+		}
+		mds = append(mds, resp.Document.MDContent)
+	}
+
+	return doclingDocument{
+		Filename:  f.filename,
+		MDContent: strings.Join(mds, "\n\n"),
+	}, nil
 }
 
 func checkHealth(url string) bool {
@@ -387,6 +445,13 @@ type doclingResponse struct {
 type doclingDocument struct {
 	Filename  string `json:"filename"`
 	MDContent string `json:"md_content"`
+}
+
+type multiDocResponse struct {
+	Documents      []doclingDocument `json:"documents"`
+	Status         string            `json:"status"`
+	Errors         []any             `json:"errors,omitempty"`
+	ProcessingTime float64           `json:"processing_time"`
 }
 
 func hasField(fields []fieldPair, key string) bool {
