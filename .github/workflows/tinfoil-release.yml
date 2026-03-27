@@ -1,9 +1,7 @@
 name: 'Tinfoil Container Release'
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
 
 jobs:
   measure-image-and-publish:
