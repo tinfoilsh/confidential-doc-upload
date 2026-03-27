@@ -9,7 +9,7 @@ models:
 
 containers:
   - name: "doc-upload-router"
-    image: "ghcr.io/tinfoilsh/doc-upload-router:latest"
+    image: "ghcr.io/tinfoilsh/confidential-doc-upload:latest"
     env:
       - DOCLING_URL: "http://localhost:5001"
       - VLLM_URL: "http://localhost:8000"
