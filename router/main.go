@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,7 +33,19 @@ var (
 	chunkPages = envInt("CHUNK_PAGES", 3)
 	splitMin   = envInt("SPLIT_THRESHOLD", 2)
 	maxFileMB  = envInt("MAX_FILE_SIZE_MB", 50)
+	maxFiles   = envInt("MAX_FILES", 10)
+	maxParts   = envInt("MAX_PARTS", 64)
 	maxChunks  = envInt("MAX_CONCURRENT_CHUNKS", 32)
+
+	allowedClientFields = map[string]bool{
+		"do_ocr":                    true,
+		"do_picture_description":    true,
+		"do_picture_classification": true,
+		"pipeline":                  true,
+		"page_range":               true,
+		"from_format":              true,
+		"to_format":                true,
+	}
 
 	chunkSem   chan struct{}
 
@@ -174,8 +189,18 @@ func vlmPipelineConfig() string {
 }
 
 type uploadedFile struct {
-	filename string
-	data     []byte
+	safeFilename string
+	data         []byte
+}
+
+func randomFilename(originalName string) string {
+	var buf [16]byte
+	rand.Read(buf[:])
+	ext := filepath.Ext(originalName)
+	if ext == "" {
+		ext = ".pdf"
+	}
+	return hex.EncodeToString(buf[:]) + ext
 }
 
 func handleConvert(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +208,9 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	defer activeReqs.Dec()
 	t0 := time.Now()
 	ctx := r.Context()
+
+	maxBodyBytes := int64(maxFiles*maxFileMB+10) * 1024 * 1024
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 
 	ct := r.Header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(ct)
@@ -194,6 +222,7 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	reader := multipart.NewReader(r.Body, params["boundary"])
 	var files []uploadedFile
 	var clientFields []fieldPair
+	partCount := 0
 
 	for {
 		part, err := reader.NextPart()
@@ -204,21 +233,36 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, "failed to parse multipart")
 			return
 		}
+
+		partCount++
+		if partCount > maxParts {
+			part.Close()
+			httpErr(w, http.StatusBadRequest, "too many parts", "max", maxParts)
+			return
+		}
+
 		name := part.FormName()
 		if name == "files" {
-			filename := part.FileName()
+			if len(files) >= maxFiles {
+				part.Close()
+				httpErr(w, http.StatusBadRequest, "too many files", "max", maxFiles)
+				return
+			}
+			safeName := randomFilename(part.FileName())
 			data, err := io.ReadAll(io.LimitReader(part, int64(maxFileMB)*1024*1024+1))
 			part.Close()
 			if err != nil || len(data) > maxFileMB*1024*1024 {
-				httpErr(w, http.StatusRequestEntityTooLarge,
-					fmt.Sprintf("file %q exceeds %dMB limit", filename, maxFileMB))
+				httpErr(w, http.StatusRequestEntityTooLarge, "file too large",
+					"max_mb", maxFileMB)
 				return
 			}
-			files = append(files, uploadedFile{filename, data})
-		} else {
+			files = append(files, uploadedFile{safeName, data})
+		} else if allowedClientFields[name] {
 			val, _ := io.ReadAll(io.LimitReader(part, 1024*1024))
 			part.Close()
 			clientFields = append(clientFields, fieldPair{name, string(val)})
+		} else {
+			part.Close()
 		}
 	}
 
@@ -238,7 +282,8 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	for _, f := range files {
 		body, pt, strategy, err := convertFile(ctx, f, clientFields, describeImages)
 		if err != nil {
-			httpErr(w, http.StatusBadGateway, err.Error())
+			httpErr(w, http.StatusBadGateway, "document processing failed",
+				"file_id", f.safeFilename, "err", err)
 			return
 		}
 		results = append(results, fileResult{body, pt, strategy})
@@ -259,8 +304,8 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	for i, res := range results {
 		var resp doclingResponse
 		if err := json.Unmarshal(res.body, &resp); err != nil {
-			httpErr(w, http.StatusBadGateway,
-				fmt.Sprintf("invalid response for file %d", i))
+			httpErr(w, http.StatusBadGateway, "invalid backend response",
+				"file_index", i, "err", err)
 			return
 		}
 		docs = append(docs, resp.Document)
@@ -289,7 +334,7 @@ func convertFile(ctx context.Context, f uploadedFile, clientFields []fieldPair, 
 	if hasField(clientFields, "pipeline") || hasField(clientFields, "do_ocr") {
 		strategy = "client_override"
 		reqTotal.WithLabelValues(string(pt), strategy).Inc()
-		body, err = postMultipartStreaming(ctx, f.data, f.filename, clientFields)
+		body, err = postMultipartStreaming(ctx, f.data, f.safeFilename, clientFields)
 		return
 	}
 
@@ -323,12 +368,12 @@ func convertFile(ctx context.Context, f uploadedFile, clientFields []fieldPair, 
 	shouldSplit := pages > splitMin
 
 	slog.Info("processing file",
-		"filename", f.filename, "type", pt, "pages", pages,
+		"file_id", f.safeFilename, "type", pt, "pages", pages,
 		"strategy", strategy, "split", shouldSplit)
 	reqTotal.WithLabelValues(string(pt), strategy).Inc()
 
 	if !shouldSplit {
-		body, err = postMultipartStreaming(ctx, f.data, f.filename, allFields)
+		body, err = postMultipartStreaming(ctx, f.data, f.safeFilename, allFields)
 		return
 	}
 
@@ -388,7 +433,7 @@ func convertChunked(ctx context.Context, f uploadedFile, allFields []fieldPair, 
 				fieldPair{"page_range", strconv.Itoa(end)},
 			)
 
-			body, err := postMultipartStreaming(ctx, f.data, f.filename, chunkFields)
+			body, err := postMultipartStreaming(ctx, f.data, f.safeFilename, chunkFields)
 			if err != nil {
 				cancel()
 			}
@@ -410,7 +455,7 @@ func convertChunked(ctx context.Context, f uploadedFile, allFields []fieldPair, 
 	}
 
 	return doclingDocument{
-		Filename:  f.filename,
+		Filename:  f.safeFilename,
 		MDContent: strings.Join(mds, "\n\n"),
 	}, nil
 }
@@ -425,12 +470,13 @@ func checkHealth(url string) bool {
 	return resp.StatusCode == 200
 }
 
-func httpErr(w http.ResponseWriter, code int, msg string) {
-	slog.Error("request error", "code", code, "msg", msg)
+func httpErr(w http.ResponseWriter, code int, clientMsg string, logAttrs ...any) {
+	attrs := append([]any{"code", code, "msg", clientMsg}, logAttrs...)
+	slog.Error("request error", attrs...)
 	reqErrors.WithLabelValues(strconv.Itoa(code)).Inc()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	json.NewEncoder(w).Encode(map[string]string{"error": clientMsg})
 }
 
 type fieldPair struct{ key, value string }
