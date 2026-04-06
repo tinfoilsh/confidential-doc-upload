@@ -351,6 +351,7 @@ func convertFile(ctx context.Context, f uploadedFile, clientFields []fieldPair, 
 	if pt == pdfBornDigital {
 		strategy = "standard"
 		routeFields = []fieldPair{
+			{"pipeline", "standard"},
 			{"do_ocr", "false"},
 		}
 		if describeImages {
