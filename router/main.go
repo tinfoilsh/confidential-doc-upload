@@ -1,15 +1,11 @@
 package main
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
-	"math"
-	"math/bits"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -17,122 +13,51 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
-
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
-	doclingURL = envOr("DOCLING_URL", "http://localhost:5001")
-	vllmURL    = envOr("VLLM_URL", "http://localhost:8000")
-	vllmModel  = envOr("VLLM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
-	listenAddr = envOr("ROUTER_PORT", "5000")
-	chunkPages = envInt("CHUNK_PAGES", 3)
-	splitMin   = envInt("SPLIT_THRESHOLD", 2)
-	maxFileMB  = envInt("MAX_FILE_SIZE_MB", 50)
-	maxFiles   = envInt("MAX_FILES", 10)
-	maxParts   = envInt("MAX_PARTS", 64)
-	maxChunks  = envInt("MAX_CONCURRENT_CHUNKS", 32)
-
-	allowedClientFields = map[string]bool{
-		"do_ocr":                    true,
-		"do_picture_description":    true,
-		"do_picture_classification": true,
-		"pipeline":                  true,
-		"page_range":               true,
-		"from_format":              true,
-		"to_format":                true,
-		"image_export_mode":        true,
-	}
-
-	chunkSem   chan struct{}
+	sidecarURL  = envOr("SIDECAR_URL", "http://localhost:5002")
+	vllmURL     = envOr("VLLM_URL", "http://localhost:8000")
+	vllmModel   = envOr("VLLM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
+	gemmaURL    = envOr("GEMMA_URL", "")
+	gemmaModel  = envOr("GEMMA_MODEL", "gemma4-31b")
+	gemmaKey    = envOr("GEMMA_KEY", "")
+	listenAddr  = envOr("ROUTER_PORT", "5000")
+	maxFileMB   = envInt("MAX_FILE_SIZE_MB", 50)
+	maxFiles    = envInt("MAX_FILES", 10)
+	maxParts    = envInt("MAX_PARTS", 64)
+	maxParallel = envInt("MAX_PARALLEL", 32)
 
 	httpClient = &http.Client{
-		Timeout: 10 * time.Minute,
-		Transport: &http.Transport{
-			MaxIdleConns:        128,
-			MaxIdleConnsPerHost: 64,
-			IdleConnTimeout:     90 * time.Second,
-		},
+		Timeout:   10 * time.Minute,
+		Transport: &http.Transport{MaxIdleConns: 128, MaxIdleConnsPerHost: 64, IdleConnTimeout: 90 * time.Second},
 	}
 
-	reqTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "router_requests_total",
-		Help: "Total requests by PDF type and routing strategy.",
-	}, []string{"pdf_type", "strategy"})
-	reqDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "router_request_duration_seconds",
-		Help:    "End-to-end request duration including all chunk processing.",
-		Buckets: prometheus.ExponentialBuckets(0.1, 2, 12),
-	}, []string{"pdf_type", "strategy"})
-	activeReqs = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "router_active_requests",
-		Help: "Number of requests currently being processed.",
-	})
-	docSizeBytes = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "router_document_size_bytes",
-		Help:    "Uploaded document size in bytes.",
-		Buckets: prometheus.ExponentialBuckets(1024, 4, 10), // 1KB to 256MB
-	}, []string{"pdf_type"})
-	docPages = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "router_document_pages",
-		Help:    "Number of pages in uploaded documents (coarse buckets).",
-		Buckets: []float64{1, 10, 50, 100, 500, 1000},
-	}, []string{"pdf_type"})
-	reqErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "router_errors_total",
-		Help: "Total errors by type.",
-	}, []string{"error_type"})
+	metricReqs     = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "router_requests_total"}, []string{"format", "mode"})
+	metricDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "router_duration_seconds", Buckets: prometheus.ExponentialBuckets(0.01, 2, 14)}, []string{"format", "mode"})
+	metricActive   = prometheus.NewGauge(prometheus.GaugeOpts{Name: "router_active_requests"})
+	metricErrors   = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "router_errors_total"}, []string{"type"})
 )
 
 func init() {
-	prometheus.MustRegister(reqTotal, reqDuration, activeReqs, docSizeBytes, docPages, reqErrors)
-	chunkSem = make(chan struct{}, maxChunks)
-}
-
-type pdfType string
-
-const (
-	pdfBornDigital pdfType = "born_digital"
-	pdfScanned     pdfType = "scanned"
-)
-
-func proxyTo(target string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, target, nil)
-		if err != nil {
-			http.Error(w, "failed to create request", http.StatusInternalServerError)
-			return
-		}
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			http.Error(w, "backend unavailable", http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
-	}
+	prometheus.MustRegister(metricReqs, metricDuration, metricActive, metricErrors)
 }
 
 func main() {
 	mux := http.NewServeMux()
-
 	mux.HandleFunc("GET /health", handleHealth)
-	mux.HandleFunc("GET /health/docling", proxyTo(doclingURL+"/health"))
-	mux.HandleFunc("GET /health/vllm", proxyTo(vllmURL+"/health"))
-
 	mux.Handle("GET /metrics", promhttp.Handler())
-	mux.HandleFunc("GET /metrics/docling", proxyTo(doclingURL+"/metrics"))
-	mux.HandleFunc("GET /metrics/vllm", proxyTo(vllmURL+"/metrics"))
-
 	mux.HandleFunc("POST /v1/convert/file", handleConvert)
 
-	slog.Info("router starting", "addr", ":"+listenAddr, "docling", doclingURL, "vllm", vllmURL)
+	slog.Info("router starting",
+		"addr", ":"+listenAddr,
+		"sidecar", sidecarURL,
+		"vllm", vllmURL,
+		"gemma", gemmaURL)
 	if err := http.ListenAndServe(":"+listenAddr, mux); err != nil {
 		slog.Error("server failed", "err", err)
 		os.Exit(1)
@@ -140,400 +65,164 @@ func main() {
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-	dOK := checkHealth(doclingURL + "/health")
+	sOK := checkHealth(sidecarURL + "/health")
 	vOK := checkHealth(vllmURL + "/health")
 	status := "ok"
-	if !dOK {
+	if !sOK {
 		status = "degraded"
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"status": status, "router": true, "docling": dOK, "vllm": vOK,
+		"status": status, "router": true, "sidecar": sOK, "vllm": vOK,
 	})
 }
 
-// picDescConfig returns the picture_description_api JSON for VLM figure enrichment.
-func picDescConfig() string {
-	cfg := map[string]any{
-		"url":         vllmURL + "/v1/chat/completions",
-		"params":      map[string]any{"model": vllmModel, "max_completion_tokens": 1000},
-		"timeout":     60.0,
-		"concurrency": 8,
-		"prompt":      "Describe this image in detail. If it contains a table, extract it as markdown. If it contains a chart, describe the data and trends.",
-	}
-	b, _ := json.Marshal(cfg)
-	return string(b)
-}
-
-// vlmPipelineConfig returns the vlm_pipeline_custom_config JSON for scanned docs.
-func vlmPipelineConfig() string {
-	cfg := map[string]any{
-		"engine_options": map[string]any{
-			"engine_type": "api",
-			"url":         vllmURL + "/v1/chat/completions",
-			"params":      map[string]any{"model": vllmModel, "max_tokens": 16384},
-			"timeout":     120.0,
-			"concurrency": 16,
-		},
-		"model_spec": map[string]any{
-			"name":            vllmModel,
-			"default_repo_id": vllmModel,
-			"prompt":          "Convert this page to markdown. Do not miss any text and only output the bare markdown!",
-			"response_format": "markdown",
-			"max_new_tokens":  16384,
-		},
-		"scale":      2.0,
-		"batch_size": 1,
-	}
-	b, _ := json.Marshal(cfg)
-	return string(b)
-}
-
-type uploadedFile struct {
-	safeFilename string
-	data         []byte
-}
-
-func randomFilename(originalName string) string {
-	var buf [16]byte
-	rand.Read(buf[:])
-	ext := filepath.Ext(originalName)
-	if ext == "" {
-		ext = ".pdf"
-	}
-	return hex.EncodeToString(buf[:]) + ext
-}
-
 func handleConvert(w http.ResponseWriter, r *http.Request) {
-	activeReqs.Inc()
-	defer activeReqs.Dec()
+	metricActive.Inc()
+	defer metricActive.Dec()
 	t0 := time.Now()
-	ctx := r.Context()
 
-	maxBodyBytes := int64(maxFiles*maxFileMB+10) * 1024 * 1024
-	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	fast := r.URL.Query().Get("fast") == "true"
+	includeImages := r.URL.Query().Get("include_images") == "true"
 
+	r.Body = http.MaxBytesReader(w, r.Body, int64(maxFiles*maxFileMB+10)*1024*1024)
 	ct := r.Header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(ct)
 	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
-		httpErr(w, http.StatusBadRequest, "expected multipart/form-data")
+		httpErr(w, 400, "expected multipart/form-data")
 		return
 	}
 
 	reader := multipart.NewReader(r.Body, params["boundary"])
+	type uploadedFile struct {
+		name string
+		data []byte
+	}
 	var files []uploadedFile
-	var clientFields []fieldPair
-	partCount := 0
 
-	for {
+	for partCount := 0; ; {
 		part, err := reader.NextPart()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			httpErr(w, http.StatusBadRequest, "failed to parse multipart")
+			httpErr(w, 400, "bad multipart")
 			return
 		}
-
 		partCount++
 		if partCount > maxParts {
 			part.Close()
-			httpErr(w, http.StatusBadRequest, "too many parts", "max", maxParts)
+			httpErr(w, 400, "too many parts")
 			return
 		}
-
-		name := part.FormName()
-		if name == "files" {
+		if part.FormName() == "files" {
 			if len(files) >= maxFiles {
 				part.Close()
-				httpErr(w, http.StatusBadRequest, "too many files", "max", maxFiles)
+				httpErr(w, 400, "too many files")
 				return
 			}
-			safeName := randomFilename(part.FileName())
-			data, err := io.ReadAll(io.LimitReader(part, int64(maxFileMB)*1024*1024+1))
+			data, _ := io.ReadAll(io.LimitReader(part, int64(maxFileMB)*1024*1024+1))
 			part.Close()
-			if err != nil || len(data) > maxFileMB*1024*1024 {
-				httpErr(w, http.StatusRequestEntityTooLarge, "file too large",
-					"max_mb", maxFileMB)
+			if len(data) > maxFileMB*1024*1024 {
+				httpErr(w, 413, "file too large")
 				return
 			}
-			files = append(files, uploadedFile{safeName, data})
-		} else if allowedClientFields[name] {
-			val, _ := io.ReadAll(io.LimitReader(part, 1024*1024))
-			part.Close()
-			clientFields = append(clientFields, fieldPair{name, string(val)})
+			name := randomName(part.FileName())
+			files = append(files, uploadedFile{name, data})
 		} else {
 			part.Close()
 		}
 	}
 
 	if len(files) == 0 {
-		httpErr(w, http.StatusBadRequest, "no file uploaded")
+		httpErr(w, 400, "no file uploaded")
 		return
 	}
 
-	describeImages := r.URL.Query().Get("describe_images") == "true"
-
-	type fileResult struct {
-		body     []byte
-		pt       pdfType
-		strategy string
-	}
-	results := make([]fileResult, 0, len(files))
-	for _, f := range files {
-		body, pt, strategy, err := convertFile(ctx, f, clientFields, describeImages)
-		if err != nil {
-			httpErr(w, http.StatusBadGateway, "document processing failed",
-				"file_id", f.safeFilename, "err", err)
-			return
-		}
-		results = append(results, fileResult{body, pt, strategy})
-	}
-
+	ctx := r.Context()
 	w.Header().Set("Content-Type", "application/json")
 
-	if len(results) == 1 {
-		res := results[0]
-		w.Header().Set("X-Router-Type", string(res.pt))
-		w.Header().Set("X-Router-Strategy", res.strategy)
-		w.Write(res.body)
+	if len(files) == 1 {
+		f := files[0]
+		result, err := convertFile(ctx, f.data, f.name, fast, includeImages)
+		if err != nil {
+			httpErr(w, 502, "processing failed", "err", err)
+			return
+		}
+
+		mode := "default"
+		if fast {
+			mode = "fast"
+		}
+		metricReqs.WithLabelValues("pdf", mode).Inc()
+		metricDuration.WithLabelValues("pdf", mode).Observe(time.Since(t0).Seconds())
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"document":        result,
+			"status":          "success",
+			"processing_time": time.Since(t0).Seconds(),
+		})
 		return
 	}
 
-	elapsed := time.Since(t0).Seconds()
-	var docs []doclingDocument
-	for i, res := range results {
-		var resp doclingResponse
-		if err := json.Unmarshal(res.body, &resp); err != nil {
-			httpErr(w, http.StatusBadGateway, "invalid backend response",
-				"file_index", i, "err", err)
+	var docs []ConvertResult
+	for _, f := range files {
+		result, err := convertFile(ctx, f.data, f.name, fast, includeImages)
+		if err != nil {
+			httpErr(w, 502, "processing failed", "file", f.name, "err", err)
 			return
 		}
-		docs = append(docs, resp.Document)
+		docs = append(docs, result)
 	}
-	w.Header().Set("X-Router-Files", strconv.Itoa(len(files)))
-	json.NewEncoder(w).Encode(multiDocResponse{
-		Documents:      docs,
-		Status:         "success",
-		ProcessingTime: elapsed,
+	json.NewEncoder(w).Encode(map[string]any{
+		"documents":       docs,
+		"status":          "success",
+		"processing_time": time.Since(t0).Seconds(),
 	})
 }
 
-func convertFile(ctx context.Context, f uploadedFile, clientFields []fieldPair, describeImages bool) (body []byte, pt pdfType, strategy string, err error) {
-	t0 := time.Now()
-	defer func() {
-		if err == nil {
-			reqDuration.WithLabelValues(string(pt), strategy).Observe(time.Since(t0).Seconds())
-		}
-	}()
+// --- helpers ---
 
-	pt, pages := classifyPDFRaw(f.data)
-	docSizeBytes.WithLabelValues(string(pt)).Observe(float64(nextPow2(len(f.data))))
-	docPages.WithLabelValues(string(pt)).Observe(float64(pages))
-
-	if !hasField(clientFields, "image_export_mode") {
-		clientFields = append(clientFields, fieldPair{"image_export_mode", "placeholder"})
+func randomName(orig string) string {
+	var b [16]byte
+	rand.Read(b[:])
+	ext := filepath.Ext(orig)
+	if ext == "" {
+		ext = ".pdf"
 	}
-
-	// If client set pipeline or do_ocr, respect their choice
-	if hasField(clientFields, "pipeline") || hasField(clientFields, "do_ocr") {
-		strategy = "client_override"
-		reqTotal.WithLabelValues(string(pt), strategy).Inc()
-		body, err = postMultipartStreaming(ctx, f.data, f.safeFilename, clientFields)
-		return
-	}
-
-	// Two paths:
-	//   born_digital → standard pipeline, no OCR, VLM describes figures
-	//   scanned      → VLM pipeline (reads page images directly)
-	var routeFields []fieldPair
-
-	if pt == pdfBornDigital {
-		strategy = "standard"
-		routeFields = []fieldPair{
-			{"pipeline", "standard"},
-			{"do_ocr", "false"},
-		}
-		if describeImages {
-			strategy = "standard+pics"
-			routeFields = append(routeFields,
-				fieldPair{"do_picture_description", "true"},
-				fieldPair{"do_picture_classification", "true"},
-				fieldPair{"picture_description_api", picDescConfig()},
-			)
-		}
-	} else {
-		strategy = "vlm"
-		routeFields = []fieldPair{
-			{"pipeline", "vlm"},
-			{"vlm_pipeline_custom_config", vlmPipelineConfig()},
-		}
-	}
-
-	allFields := append(clientFields, routeFields...)
-	shouldSplit := pages > splitMin
-
-	slog.Info("processing file",
-		"file_id", f.safeFilename, "type", pt, "pages", pages,
-		"strategy", strategy, "split", shouldSplit)
-	reqTotal.WithLabelValues(string(pt), strategy).Inc()
-
-	if !shouldSplit {
-		body, err = postMultipartStreaming(ctx, f.data, f.safeFilename, allFields)
-		return
-	}
-
-	var doc doclingDocument
-	doc, err = convertChunked(ctx, f, allFields, pages)
-	if err != nil {
-		return
-	}
-	merged := doclingResponse{
-		Document:       doc,
-		Status:         "success",
-		ProcessingTime: time.Since(t0).Seconds(),
-	}
-	body, err = json.Marshal(merged)
-	return
-}
-
-func convertChunked(ctx context.Context, f uploadedFile, allFields []fieldPair, pages int) (doclingDocument, error) {
-	nChunks := int(math.Ceil(float64(pages) / float64(chunkPages)))
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	type chunkResult struct {
-		idx  int
-		body []byte
-		err  error
-	}
-	results := make([]chunkResult, nChunks)
-	var wg sync.WaitGroup
-
-	for i := 0; i < nChunks; i++ {
-		select {
-		case chunkSem <- struct{}{}:
-		case <-ctx.Done():
-			results[i] = chunkResult{i, nil, ctx.Err()}
-			break
-		}
-		if ctx.Err() != nil {
-			break
-		}
-
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			defer func() { <-chunkSem }()
-
-			start := idx*chunkPages + 1
-			end := (idx + 1) * chunkPages
-			if end > pages {
-				end = pages
-			}
-
-			chunkFields := make([]fieldPair, len(allFields), len(allFields)+2)
-			copy(chunkFields, allFields)
-			chunkFields = append(chunkFields,
-				fieldPair{"page_range", strconv.Itoa(start)},
-				fieldPair{"page_range", strconv.Itoa(end)},
-			)
-
-			body, err := postMultipartStreaming(ctx, f.data, f.safeFilename, chunkFields)
-			if err != nil {
-				cancel()
-			}
-			results[idx] = chunkResult{idx, body, err}
-		}(i)
-	}
-	wg.Wait()
-
-	var mds []string
-	for _, cr := range results {
-		if cr.err != nil {
-			return doclingDocument{}, fmt.Errorf("chunk %d: %w", cr.idx, cr.err)
-		}
-		var resp doclingResponse
-		if err := json.Unmarshal(cr.body, &resp); err != nil {
-			return doclingDocument{}, fmt.Errorf("chunk %d: invalid response", cr.idx)
-		}
-		mds = append(mds, resp.Document.MDContent)
-	}
-
-	return doclingDocument{
-		Filename:  f.safeFilename,
-		MDContent: strings.Join(mds, "\n\n"),
-	}, nil
+	return hex.EncodeToString(b[:]) + ext
 }
 
 func checkHealth(url string) bool {
 	c := &http.Client{Timeout: 3 * time.Second}
-	resp, err := c.Get(url)
+	r, err := c.Get(url)
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
-	return resp.StatusCode == 200
+	r.Body.Close()
+	return r.StatusCode == 200
 }
 
-func httpErr(w http.ResponseWriter, code int, clientMsg string, logAttrs ...any) {
-	attrs := append([]any{"code", code, "msg", clientMsg}, logAttrs...)
-	slog.Error("request error", attrs...)
-	reqErrors.WithLabelValues(strconv.Itoa(code)).Inc()
+func httpErr(w http.ResponseWriter, code int, msg string, attrs ...any) {
+	slog.Error("request error", append([]any{"code", code, "msg", msg}, attrs...)...)
+	metricErrors.WithLabelValues(strconv.Itoa(code)).Inc()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": clientMsg})
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-type fieldPair struct{ key, value string }
-
-type doclingResponse struct {
-	Document       doclingDocument `json:"document"`
-	Status         string          `json:"status"`
-	Errors         []any           `json:"errors"`
-	ProcessingTime float64         `json:"processing_time"`
-}
-
-type doclingDocument struct {
-	Filename  string `json:"filename"`
-	MDContent string `json:"md_content"`
-}
-
-type multiDocResponse struct {
-	Documents      []doclingDocument `json:"documents"`
-	Status         string            `json:"status"`
-	Errors         []any             `json:"errors,omitempty"`
-	ProcessingTime float64           `json:"processing_time"`
-}
-
-func hasField(fields []fieldPair, key string) bool {
-	for _, f := range fields {
-		if f.key == key {
-			return true
-		}
-	}
-	return false
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
+func envOr(k, d string) string {
+	if v := os.Getenv(k); v != "" {
 		return v
 	}
-	return def
+	return d
 }
 
-func nextPow2(n int) int {
-	if n <= 1 {
-		return 1
-	}
-	return 1 << bits.Len(uint(n-1))
-}
-
-func envInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
+func envInt(k string, d int) int {
+	if v := os.Getenv(k); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
 	}
-	return def
+	return d
 }
