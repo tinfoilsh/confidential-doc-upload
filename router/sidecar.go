@@ -65,9 +65,12 @@ func sidecarPost(ctx context.Context, endpoint string, data []byte, filename str
 	defer resp.Body.Close()
 
 	const maxResponseBytes = 512 * 1024 * 1024 // 512MB
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("sidecar %s read: %w", endpoint, err)
+	}
+	if len(body) > maxResponseBytes {
+		return nil, fmt.Errorf("sidecar %s: response too large (>512MB)", endpoint)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("sidecar %s returned %d: %s", endpoint, resp.StatusCode, truncate(string(body), 256))
