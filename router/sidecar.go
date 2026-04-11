@@ -64,7 +64,8 @@ func sidecarPost(ctx context.Context, endpoint string, data []byte, filename str
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	const maxResponseBytes = 512 * 1024 * 1024 // 512MB
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("sidecar %s read: %w", endpoint, err)
 	}
