@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 app = FastAPI()
 
 SCANNED_THRESHOLD = 50
+MAX_PAGES = 200
 
 
 @app.get("/health")
@@ -68,6 +69,9 @@ async def render(file: UploadFile = File(...), dpi: int = Form(100)):
     pages = []
     if ext == ".pdf":
         doc = fitz.open(stream=data, filetype="pdf")
+        if doc.page_count > MAX_PAGES:
+            doc.close()
+            return {"pages": [], "page_count": 0, "error": f"Too many pages", "elapsed_s": time.time() - t0}
         zoom = dpi / 72.0
         mat = fitz.Matrix(zoom, zoom)
         for i in range(doc.page_count):
@@ -94,6 +98,9 @@ async def render(file: UploadFile = File(...), dpi: int = Form(100)):
 
 def _extract_pdf(data: bytes) -> dict:
     doc = fitz.open(stream=data, filetype="pdf")
+    if doc.page_count > MAX_PAGES:
+        doc.close()
+        return {"format": "pdf", "pages": [], "error": f"Too many pages ({doc.page_count} > {MAX_PAGES})"}
     pages = []
     for i in range(doc.page_count):
         text = doc[i].get_text()

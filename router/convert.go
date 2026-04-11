@@ -16,7 +16,6 @@ type PageResult struct {
 
 type ConvertResult struct {
 	MDContent string       `json:"md_content"`
-	Filename  string       `json:"filename"`
 	Pages     []PageResult `json:"pages,omitempty"`
 }
 
@@ -36,13 +35,13 @@ func convertFile(ctx context.Context, data []byte, filename string, mode string)
 	if extracted.Format != "pdf" && extracted.Format != "image" {
 		slog.Info("processed", "file", filename, "format", extracted.Format,
 			"elapsed", time.Since(t0).Seconds())
-		return ConvertResult{MDContent: extracted.MDContent, Filename: filename}, nil
+		return ConvertResult{MDContent: extracted.MDContent}, nil
 	}
 
 	// Standalone image file
 	if extracted.Format == "image" {
 		if mode == "raw" {
-			return ConvertResult{Filename: filename}, nil
+			return ConvertResult{}, nil
 		}
 		return convertImage(ctx, data, filename, mode)
 	}
@@ -54,11 +53,11 @@ func convertFile(ctx context.Context, data []byte, filename string, mode string)
 func convertImage(ctx context.Context, data []byte, filename string, mode string) (ConvertResult, error) {
 	rendered, err := sidecarRender(ctx, data, filename, 100)
 	if err != nil || len(rendered.Pages) == 0 {
-		return ConvertResult{Filename: filename}, err
+		return ConvertResult{}, err
 	}
 	img := rendered.Pages[0].Image
 
-	result := ConvertResult{Filename: filename}
+	result := ConvertResult{}
 	if mode == "images" {
 		result.Pages = []PageResult{{Page: 1, Image: img, IsScanned: true}}
 	} else {
@@ -92,7 +91,7 @@ func convertPDF(ctx context.Context, data []byte, filename, mode string, extract
 
 	switch mode {
 	case "raw":
-		return convertPDFRaw(filename, nPages, textPages)
+		return convertPDFRaw(nPages, textPages)
 	case "images":
 		return convertPDFImages(ctx, data, filename, nPages, textPages, scannedSet)
 	case "vlm":
@@ -127,20 +126,18 @@ func convertPDFImages(ctx context.Context, data []byte, filename string, nPages 
 
 	return ConvertResult{
 		MDContent: strings.Join(parts, "\n\n---\n\n"),
-		Filename:  filename,
 		Pages:     pages,
 	}, nil
 }
 
 // mode=raw: text layer only, no VLM, no rendering — fastest possible
-func convertPDFRaw(filename string, nPages int, textPages map[int]string) (ConvertResult, error) {
+func convertPDFRaw(nPages int, textPages map[int]string) (ConvertResult, error) {
 	var parts []string
 	for i := 1; i <= nPages; i++ {
 		parts = append(parts, textPages[i])
 	}
 	return ConvertResult{
 		MDContent: strings.Join(parts, "\n\n---\n\n"),
-		Filename:  filename,
 	}, nil
 }
 
@@ -173,11 +170,10 @@ func convertPDFVLM(ctx context.Context, data []byte, filename string, nPages int
 
 	return ConvertResult{
 		MDContent: strings.Join(parts, "\n\n---\n\n"),
-		Filename:  filename,
 	}, nil
 }
 
-// mode=text (default): full extraction with Gemma OCR + visual descriptions
+// mode=text (default): full extraction with VLM OCR + visual descriptions
 func convertPDFText(ctx context.Context, data []byte, filename string, nPages int, scannedIdxs []int, textPages map[int]string, scannedSet map[int]bool, t0 time.Time) (ConvertResult, error) {
 	needsRender := len(scannedIdxs) > 0 || len(textPages) > 0
 	var renderedImages map[int]string
@@ -243,6 +239,5 @@ func convertPDFText(ctx context.Context, data []byte, filename string, nPages in
 
 	return ConvertResult{
 		MDContent: strings.Join(parts, "\n\n---\n\n"),
-		Filename:  filename,
 	}, nil
 }

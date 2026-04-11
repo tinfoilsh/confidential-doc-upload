@@ -54,7 +54,13 @@ func main() {
 		"addr", ":"+listenAddr,
 		"sidecar", sidecarURL,
 		"vlm_model", vlmModel)
-	if err := http.ListenAndServe(":"+listenAddr, mux); err != nil {
+	srv := &http.Server{
+		Addr:        ":" + listenAddr,
+		Handler:     mux,
+		ReadTimeout: 5 * time.Minute,
+		IdleTimeout: 120 * time.Second,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		slog.Error("server failed", "err", err)
 		os.Exit(1)
 	}
@@ -148,7 +154,8 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 		f := files[0]
 		result, err := convertFile(ctx, f.data, f.name, mode)
 		if err != nil {
-			httpErr(w, 502, "processing failed", "err", err)
+			slog.Error("convert failed", "err", err)
+			httpErr(w, 502, "processing failed")
 			return
 		}
 
@@ -164,10 +171,11 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var docs []ConvertResult
-	for _, f := range files {
+	for i, f := range files {
 		result, err := convertFile(ctx, f.data, f.name, mode)
 		if err != nil {
-			httpErr(w, 502, "processing failed", "file", f.name, "err", err)
+			slog.Error("convert failed", "file_index", i, "err", err)
+			httpErr(w, 502, "processing failed")
 			return
 		}
 		docs = append(docs, result)
