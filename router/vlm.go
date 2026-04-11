@@ -14,7 +14,7 @@ import (
 
 var (
 	vlmModel = envOr("VLM_MODEL", "gemma4-31b")
-	vlmKey   = envOr("VLM_KEY", "")
+	vlmKey   = envOr("TINFOIL_API_KEY", "")
 
 	tinfoilVLM *tinfoil.Client
 )
@@ -44,7 +44,7 @@ If the page contains NONE of the above elements, respond with exactly: NONE`
 
 func initTinfoilClient() {
 	if vlmKey == "" {
-		slog.Warn("no VLM_KEY set, VLM calls will fail")
+		slog.Warn("no TINFOIL_API_KEY set, VLM calls will fail")
 		return
 	}
 	client, err := tinfoil.NewClient(
@@ -60,7 +60,7 @@ func initTinfoilClient() {
 
 func vlmCall(ctx context.Context, imageB64, prompt string, maxTokens int) (string, error) {
 	if tinfoilVLM == nil {
-		return "", fmt.Errorf("VLM client not initialized (missing VLM_KEY?)")
+		return "", fmt.Errorf("VLM client not initialized (missing TINFOIL_API_KEY?)")
 	}
 	resp, err := tinfoilVLM.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 		Model: vlmModel,
