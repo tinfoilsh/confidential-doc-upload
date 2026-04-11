@@ -1,9 +1,7 @@
 """Document processing sidecar: text extraction + page rendering.
 
-Supports: PDF (pdfplumber), DOCX (python-docx), PPTX (python-pptx),
+Supports: PDF (PyMuPDF), DOCX (python-docx), PPTX (python-pptx),
 HTML (beautifulsoup4), XLSX (openpyxl), CSV, Markdown, images.
-
-Matches docling's extraction behavior for each format.
 """
 
 import base64
@@ -12,7 +10,7 @@ import io
 import time
 from pathlib import Path
 
-import pdfplumber
+import fitz  # PyMuPDF
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
@@ -69,15 +67,16 @@ async def render(file: UploadFile = File(...), dpi: int = Form(100)):
 
     pages = []
     if ext == ".pdf":
-        with pdfplumber.open(io.BytesIO(data)) as pdf:
-            for i, page in enumerate(pdf.pages):
-                img = page.to_image(resolution=dpi)
-                buf = io.BytesIO()
-                img.original.save(buf, format="PNG")
-                pages.append({
-                    "page": i + 1,
-                    "image": base64.b64encode(buf.getvalue()).decode("ascii"),
-                })
+        doc = fitz.open(stream=data, filetype="pdf")
+        zoom = dpi / 72.0
+        mat = fitz.Matrix(zoom, zoom)
+        for i in range(doc.page_count):
+            pix = doc[i].get_pixmap(matrix=mat)
+            pages.append({
+                "page": i + 1,
+                "image": base64.b64encode(pix.tobytes("png")).decode("ascii"),
+            })
+        doc.close()
     elif ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff"):
         pages.append({
             "page": 1,
@@ -94,15 +93,16 @@ async def render(file: UploadFile = File(...), dpi: int = Form(100)):
 # ── PDF ───────────────────────────────────────────────────────────────────
 
 def _extract_pdf(data: bytes) -> dict:
+    doc = fitz.open(stream=data, filetype="pdf")
     pages = []
-    with pdfplumber.open(io.BytesIO(data)) as pdf:
-        for i, page in enumerate(pdf.pages):
-            text = page.extract_text() or ""
-            pages.append({
-                "page": i + 1,
-                "text": text,
-                "is_scanned": len(text.strip()) < SCANNED_THRESHOLD,
-            })
+    for i in range(doc.page_count):
+        text = doc[i].get_text()
+        pages.append({
+            "page": i + 1,
+            "text": text,
+            "is_scanned": len(text.strip()) < SCANNED_THRESHOLD,
+        })
+    doc.close()
     return {"format": "pdf", "pages": pages}
 
 

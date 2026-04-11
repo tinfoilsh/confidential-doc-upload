@@ -1,15 +1,18 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"log/slog"
 	"strings"
 	"sync"
+
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/tinfoilsh/tinfoil-go"
 )
+
+var tinfoilOpenAI *tinfoil.Client
 
 const vlmOCRPrompt = "Convert this page to markdown. Do not miss any text and only output the bare markdown!"
 
@@ -34,49 +37,46 @@ Format each element as:
 
 If the page contains NONE of the above elements, respond with exactly: NONE`
 
-func vlmCall(ctx context.Context, url, model, apiKey, imageB64, prompt string, maxTokens int) (string, error) {
-	body, _ := json.Marshal(map[string]any{
-		"model": model,
-		"messages": []map[string]any{{
-			"role": "user",
-			"content": []map[string]any{
-				{"type": "image_url", "image_url": map[string]string{"url": "data:image/png;base64," + imageB64}},
-				{"type": "text", "text": prompt},
-			},
-		}},
-		"max_tokens": maxTokens,
+func initTinfoilClient() {
+	if gemmaKey == "" {
+		slog.Warn("no GEMMA_KEY set, all VLM calls will fail")
+		return
+	}
+	client, err := tinfoil.NewClient(
+		option.WithAPIKey(gemmaKey),
+	)
+	if err != nil {
+		slog.Error("failed to create Tinfoil client", "err", err)
+		return
+	}
+	tinfoilOpenAI = client
+	slog.Info("tinfoil client initialized", "model", gemmaModel)
+}
+
+func tinfoilVLMCall(ctx context.Context, imageB64, prompt string, maxTokens int) (string, error) {
+	if tinfoilOpenAI == nil {
+		return "", fmt.Errorf("tinfoil client not initialized (missing GEMMA_KEY?)")
+	}
+	resp, err := tinfoilOpenAI.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model: gemmaModel,
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.UserMessage([]openai.ChatCompletionContentPartUnionParam{
+				openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+					URL: "data:image/png;base64," + imageB64,
+				}),
+				openai.TextContentPart(prompt),
+			}),
+		},
+		MaxTokens: openai.Int(int64(maxTokens)),
 	})
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("tinfoil vlm: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("vlm: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("vlm %d: %s", resp.StatusCode, truncate(string(respBody), 256))
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("tinfoil vlm: empty response")
 	}
 
-	var r struct {
-		Choices []struct {
-			Message struct{ Content string } `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(respBody, &r); err != nil || len(r.Choices) == 0 {
-		return "", fmt.Errorf("vlm: bad response")
-	}
-
-	md := strings.TrimSpace(r.Choices[0].Message.Content)
+	md := strings.TrimSpace(resp.Choices[0].Message.Content)
 	if strings.HasPrefix(md, "```") {
 		if i := strings.Index(md, "\n"); i >= 0 {
 			md = md[i+1:]
@@ -87,68 +87,54 @@ func vlmCall(ctx context.Context, url, model, apiKey, imageB64, prompt string, m
 }
 
 func vlmFullPageOCR(ctx context.Context, imageB64 string) (string, error) {
-	return vlmCall(ctx,
-		vllmURL+"/v1/chat/completions", vllmModel, "",
-		imageB64, vlmOCRPrompt, 8000)
+	return tinfoilVLMCall(ctx, imageB64, vlmOCRPrompt, 8000)
 }
 
 func vlmVisualExtract(ctx context.Context, imageB64 string) (string, error) {
-	if gemmaURL != "" {
-		// Remote Gemma on a Tinfoil enclave. The request goes over HTTPS with
-		// an API key; the remote enclave's shim validates the key and handles
-		// attestation. For full mutual attestation (verifying the remote
-		// enclave's identity from this side), add tinfoil-go as a dependency
-		// and use verifier/client.TLSBoundRoundTripper as the HTTP transport.
-		// TODO: add tinfoil-go TLSBoundRoundTripper for enclave-to-enclave calls
-		return vlmCall(ctx,
-			gemmaURL+"/v1/chat/completions", gemmaModel, gemmaKey,
-			imageB64, vlmVisualPrompt, 4000)
-	}
-	// Fallback: local Qwen
-	return vlmCall(ctx,
-		vllmURL+"/v1/chat/completions", vllmModel, "",
-		imageB64, vlmVisualPrompt, 4000)
+	return tinfoilVLMCall(ctx, imageB64, vlmVisualPrompt, 4000)
 }
 
 type vlmPageFunc func(ctx context.Context, imageB64 string) (string, error)
 
-func vlmParallel(ctx context.Context, images map[int]string, fn vlmPageFunc) (map[int]string, error) {
-	results := make(map[int]string)
+type vlmWorkItem struct {
+	image string
+	fn    vlmPageFunc
+	kind  string // "ocr" or "visual"
+}
+
+type vlmResult struct {
+	text string
+	err  error
+}
+
+// vlmParallelMixed fires all VLM work (OCR + visual) in a single parallel batch.
+// Individual failures don't cancel other in-flight requests.
+func vlmParallelMixed(ctx context.Context, work map[int]vlmWorkItem) map[int]vlmResult {
+	results := make(map[int]vlmResult)
 	var mu sync.Mutex
-	var firstErr error
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxParallel)
 
-	for idx, img := range images {
+	for idx, item := range work {
 		wg.Add(1)
-		go func(pageIdx int, b64 string) {
+		go func(pageIdx int, w vlmWorkItem) {
 			defer wg.Done()
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			case <-ctx.Done():
+				mu.Lock()
+				results[pageIdx] = vlmResult{err: ctx.Err()}
+				mu.Unlock()
 				return
 			}
 
-			md, err := fn(ctx, b64)
+			text, err := w.fn(ctx, w.image)
 			mu.Lock()
-			if err != nil && firstErr == nil {
-				firstErr = fmt.Errorf("page %d: %w", pageIdx, err)
-				cancel()
-			} else if err == nil {
-				results[pageIdx] = md
-			}
+			results[pageIdx] = vlmResult{text: text, err: err}
 			mu.Unlock()
-		}(idx, img)
+		}(idx, item)
 	}
 	wg.Wait()
-
-	if firstErr != nil {
-		return nil, firstErr
-	}
-	return results, nil
+	return results
 }
