@@ -4,7 +4,7 @@ memory: 8192
 
 containers:
   - name: "doc-upload"
-    image: "ghcr.io/tinfoilsh/confidential-doc-upload@sha256:latest"
+    image: "ghcr.io/tinfoilsh/confidential-doc-upload@sha256:0ba05d664d1680a05fc4ca4643204039c2c2b092941303d27a0bf66b1eabf446" # v0.0.24
     env:
       - VLM_MODEL: "gemma4-31b"
       - SIDECAR_URL: "http://localhost:5002"
