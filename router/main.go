@@ -129,8 +129,12 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 				httpErr(w, 400, "too many files")
 				return
 			}
-			data, _ := io.ReadAll(io.LimitReader(part, int64(maxFileMB)*1024*1024+1))
+			data, err := io.ReadAll(io.LimitReader(part, int64(maxFileMB)*1024*1024+1))
 			part.Close()
+			if err != nil {
+				httpErr(w, 400, "failed to read file")
+				return
+			}
 			if len(data) > maxFileMB*1024*1024 {
 				httpErr(w, 413, "file too large")
 				return
@@ -180,6 +184,9 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 		}
 		docs = append(docs, result)
 	}
+	metricReqs.WithLabelValues("pdf", mode).Inc()
+	metricDuration.WithLabelValues("pdf", mode).Observe(time.Since(t0).Seconds())
+
 	json.NewEncoder(w).Encode(map[string]any{
 		"documents":       docs,
 		"status":          "success",
