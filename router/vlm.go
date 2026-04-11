@@ -12,7 +12,12 @@ import (
 	"github.com/tinfoilsh/tinfoil-go"
 )
 
-var tinfoilOpenAI *tinfoil.Client
+var (
+	vlmModel = envOr("VLM_MODEL", "gemma4-31b")
+	vlmKey   = envOr("VLM_KEY", "")
+
+	tinfoilVLM *tinfoil.Client
+)
 
 const vlmOCRPrompt = "Convert this page to markdown. Do not miss any text and only output the bare markdown!"
 
@@ -38,27 +43,27 @@ Format each element as:
 If the page contains NONE of the above elements, respond with exactly: NONE`
 
 func initTinfoilClient() {
-	if gemmaKey == "" {
-		slog.Warn("no GEMMA_KEY set, all VLM calls will fail")
+	if vlmKey == "" {
+		slog.Warn("no VLM_KEY set, VLM calls will fail")
 		return
 	}
 	client, err := tinfoil.NewClient(
-		option.WithAPIKey(gemmaKey),
+		option.WithAPIKey(vlmKey),
 	)
 	if err != nil {
 		slog.Error("failed to create Tinfoil client", "err", err)
 		return
 	}
-	tinfoilOpenAI = client
-	slog.Info("tinfoil client initialized", "model", gemmaModel)
+	tinfoilVLM = client
+	slog.Info("tinfoil VLM client initialized", "model", vlmModel)
 }
 
-func tinfoilVLMCall(ctx context.Context, imageB64, prompt string, maxTokens int) (string, error) {
-	if tinfoilOpenAI == nil {
-		return "", fmt.Errorf("tinfoil client not initialized (missing GEMMA_KEY?)")
+func vlmCall(ctx context.Context, imageB64, prompt string, maxTokens int) (string, error) {
+	if tinfoilVLM == nil {
+		return "", fmt.Errorf("VLM client not initialized (missing VLM_KEY?)")
 	}
-	resp, err := tinfoilOpenAI.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-		Model: gemmaModel,
+	resp, err := tinfoilVLM.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model: vlmModel,
 		Messages: []openai.ChatCompletionMessageParamUnion{
 			openai.UserMessage([]openai.ChatCompletionContentPartUnionParam{
 				openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
@@ -70,10 +75,10 @@ func tinfoilVLMCall(ctx context.Context, imageB64, prompt string, maxTokens int)
 		MaxTokens: openai.Int(int64(maxTokens)),
 	})
 	if err != nil {
-		return "", fmt.Errorf("tinfoil vlm: %w", err)
+		return "", fmt.Errorf("vlm: %w", err)
 	}
 	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("tinfoil vlm: empty response")
+		return "", fmt.Errorf("vlm: empty response")
 	}
 
 	md := strings.TrimSpace(resp.Choices[0].Message.Content)
@@ -87,11 +92,11 @@ func tinfoilVLMCall(ctx context.Context, imageB64, prompt string, maxTokens int)
 }
 
 func vlmFullPageOCR(ctx context.Context, imageB64 string) (string, error) {
-	return tinfoilVLMCall(ctx, imageB64, vlmOCRPrompt, 8000)
+	return vlmCall(ctx, imageB64, vlmOCRPrompt, 8000)
 }
 
 func vlmVisualExtract(ctx context.Context, imageB64 string) (string, error) {
-	return tinfoilVLMCall(ctx, imageB64, vlmVisualPrompt, 4000)
+	return vlmCall(ctx, imageB64, vlmVisualPrompt, 4000)
 }
 
 type vlmPageFunc func(ctx context.Context, imageB64 string) (string, error)
@@ -107,8 +112,6 @@ type vlmResult struct {
 	err  error
 }
 
-// vlmParallelMixed fires all VLM work (OCR + visual) in a single parallel batch.
-// Individual failures don't cancel other in-flight requests.
 func vlmParallelMixed(ctx context.Context, work map[int]vlmWorkItem) map[int]vlmResult {
 	results := make(map[int]vlmResult)
 	var mu sync.Mutex
