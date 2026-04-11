@@ -20,12 +20,9 @@ import (
 )
 
 var (
-	sidecarURL  = envOr("SIDECAR_URL", "http://localhost:5002")
-	vllmURL     = envOr("VLLM_URL", "http://localhost:8000")
-	vllmModel   = envOr("VLLM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
-	gemmaURL    = envOr("GEMMA_URL", "")
-	gemmaModel  = envOr("GEMMA_MODEL", "gemma4-31b")
-	gemmaKey    = envOr("GEMMA_KEY", "")
+	sidecarURL = envOr("SIDECAR_URL", "http://localhost:5002")
+	gemmaModel = envOr("GEMMA_MODEL", "gemma4-31b")
+	gemmaKey   = envOr("GEMMA_KEY", "")
 	listenAddr  = envOr("ROUTER_PORT", "5000")
 	maxFileMB   = envInt("MAX_FILE_SIZE_MB", 50)
 	maxFiles    = envInt("MAX_FILES", 10)
@@ -48,6 +45,8 @@ func init() {
 }
 
 func main() {
+	initTinfoilClient()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
 	mux.Handle("GET /metrics", promhttp.Handler())
@@ -56,8 +55,7 @@ func main() {
 	slog.Info("router starting",
 		"addr", ":"+listenAddr,
 		"sidecar", sidecarURL,
-		"vllm", vllmURL,
-		"gemma", gemmaURL)
+		"vlm_model", gemmaModel)
 	if err := http.ListenAndServe(":"+listenAddr, mux); err != nil {
 		slog.Error("server failed", "err", err)
 		os.Exit(1)
@@ -66,14 +64,14 @@ func main() {
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	sOK := checkHealth(sidecarURL + "/health")
-	vOK := checkHealth(vllmURL + "/health")
+	vlmOK := tinfoilOpenAI != nil
 	status := "ok"
-	if !sOK {
+	if !sOK || !vlmOK {
 		status = "degraded"
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"status": status, "router": true, "sidecar": sOK, "vllm": vOK,
+		"status": status, "router": true, "sidecar": sOK, "vlm": vlmOK,
 	})
 }
 
@@ -82,8 +80,14 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	defer metricActive.Dec()
 	t0 := time.Now()
 
-	fast := r.URL.Query().Get("fast") == "true"
-	includeImages := r.URL.Query().Get("include_images") == "true"
+	mode := r.URL.Query().Get("mode")
+	if mode == "" {
+		mode = "text"
+	}
+	if mode != "text" && mode != "images" && mode != "raw" && mode != "vlm" {
+		httpErr(w, 400, "invalid mode: must be 'text', 'images', 'raw', or 'vlm'")
+		return
+	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, int64(maxFiles*maxFileMB+10)*1024*1024)
 	ct := r.Header.Get("Content-Type")
@@ -144,16 +148,12 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 
 	if len(files) == 1 {
 		f := files[0]
-		result, err := convertFile(ctx, f.data, f.name, fast, includeImages)
+		result, err := convertFile(ctx, f.data, f.name, mode)
 		if err != nil {
 			httpErr(w, 502, "processing failed", "err", err)
 			return
 		}
 
-		mode := "default"
-		if fast {
-			mode = "fast"
-		}
 		metricReqs.WithLabelValues("pdf", mode).Inc()
 		metricDuration.WithLabelValues("pdf", mode).Observe(time.Since(t0).Seconds())
 
@@ -167,7 +167,7 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 
 	var docs []ConvertResult
 	for _, f := range files {
-		result, err := convertFile(ctx, f.data, f.name, fast, includeImages)
+		result, err := convertFile(ctx, f.data, f.name, mode)
 		if err != nil {
 			httpErr(w, 502, "processing failed", "file", f.name, "err", err)
 			return
