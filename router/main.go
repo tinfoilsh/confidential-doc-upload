@@ -20,9 +20,7 @@ import (
 )
 
 var (
-	sidecarURL = envOr("SIDECAR_URL", "http://localhost:5002")
-	gemmaModel = envOr("GEMMA_MODEL", "gemma4-31b")
-	gemmaKey   = envOr("GEMMA_KEY", "")
+	sidecarURL  = envOr("SIDECAR_URL", "http://localhost:5002")
 	listenAddr  = envOr("ROUTER_PORT", "5000")
 	maxFileMB   = envInt("MAX_FILE_SIZE_MB", 50)
 	maxFiles    = envInt("MAX_FILES", 10)
@@ -55,7 +53,7 @@ func main() {
 	slog.Info("router starting",
 		"addr", ":"+listenAddr,
 		"sidecar", sidecarURL,
-		"vlm_model", gemmaModel)
+		"vlm_model", vlmModel)
 	if err := http.ListenAndServe(":"+listenAddr, mux); err != nil {
 		slog.Error("server failed", "err", err)
 		os.Exit(1)
@@ -64,7 +62,7 @@ func main() {
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	sOK := checkHealth(sidecarURL + "/health")
-	vlmOK := tinfoilOpenAI != nil
+	vlmOK := tinfoilVLM != nil
 	status := "ok"
 	if !sOK || !vlmOK {
 		status = "degraded"
