@@ -1,85 +1,162 @@
 # confidential-doc-upload
 
-Tinfoil confidential document conversion service. Converts PDFs to markdown using
-[docling-serve](https://github.com/docling-project/docling-serve) with a smart
-routing layer that optimizes for speed and quality based on document type.
+Tinfoil confidential document processing service. Extracts text and renders page images from uploaded documents (PDF, DOCX, PPTX, HTML, XLSX, CSV, images) inside a Trusted Execution Environment.
+
+No GPU required. Text extraction uses [PyMuPDF](https://pymupdf.readthedocs.io/) (C-native, 48x faster than pdfplumber). Visual element extraction and OCR use a remote VLM via the [Tinfoil SDK](https://github.com/tinfoilsh/tinfoil-go) with attestation verification.
 
 ## Architecture
 
 ```
-Client → Tinfoil Shim (TLS + auth) → Router (:5000) → Docling-serve (:5001)
+Client → Tinfoil Shim (TLS + auth) → Go Router (:5000) → Python Sidecar (:5002)
+                                           ↓
+                                      Tinfoil SDK → VLM (gemma4-31b)
 ```
 
-### Router (`router/`)
+Single container runs both processes:
+- **Go Router** — HTTP API, mode selection, parallel VLM dispatch
+- **Python Sidecar** — PyMuPDF text extraction + page rendering, format-specific parsers
 
-Lightweight Python/FastAPI service that:
-1. **Classifies PDFs** — born-digital vs scanned (< 5ms, text extraction heuristic)
-2. **Chooses optimal pipeline** — skips OCR for born-digital, uses EasyOCR for scans
-3. **Splits large documents** — sends chunks to different docling workers in parallel
-4. **Merges results** — concatenates markdown from chunks
+## API
 
-### Docling-serve
+### `POST /v1/convert/file?mode=text|images|raw|vlm`
 
-Upstream [docling-serve](https://github.com/docling-project/docling-serve) v1.15.0
-with optimized settings:
-- `UVICORN_WORKERS=8` — 8 parallel worker processes for true GPU parallelism
-- `LAYOUT_BATCH_SIZE=16` — allows GPU to batch work across workers efficiently
-- `ENG_LOC_NUM_WORKERS=1` — one docling worker per uvicorn process
+Upload one or more files as `multipart/form-data` with field name `files`.
 
-## Performance
+#### Modes
 
-On a 19-page academic PDF (NVIDIA H200):
+| Mode | Description | Speed (18p PDF) |
+|------|-------------|-----------------|
+| **`text`** (default) | Full extraction: PyMuPDF text + VLM visual descriptions for born-digital pages, VLM OCR for scanned pages | ~13s |
+| **`images`** | Text where available + page images as base64 PNG. No VLM calls. For vision-capable downstream models. | **0.8s** |
+| **`raw`** | Text layer only. No VLM, no rendering. Fastest possible. | **0.1s** |
+| **`vlm`** | VLM full-page OCR on every page. Highest quality. | ~30s+ |
 
-| Config | Latency | Improvement |
-|--------|---------|-------------|
-| Original (v1.13.1, defaults) | 22s | baseline |
-| Optimized (v1.15.0, tuned) | 14s | 1.6x |
-| + Router (skip OCR for born-digital) | 14s | 1.6x |
-| + Split processing (7 chunks × 3pp) | **4s** | **5.5x** |
+#### Response
 
-Concurrent throughput: 8 requests in ~24s with batch_size=16.
+```json
+{
+  "document": {
+    "md_content": "# Title\n\nExtracted text...",
+    "pages": [
+      {"page": 1, "image": "base64...", "is_scanned": false},
+      {"page": 2, "image": "base64...", "is_scanned": true}
+    ]
+  },
+  "status": "success",
+  "processing_time": 1.23
+}
+```
+
+- `md_content` — always present. Full text in `text`/`vlm` modes, text-layer only in `images`/`raw`.
+- `pages[]` — only in `images` mode. Each page has `image` (base64 PNG), `is_scanned` flag.
+- Multi-file uploads return `documents[]` array instead of `document`.
+
+#### Examples
+
+```bash
+# Default (text mode) — full extraction with VLM
+curl -X POST https://doc-upload.example.com/v1/convert/file \
+    -H "Authorization: Bearer $API_KEY" \
+    -F "files=@document.pdf"
+
+# Images mode — fast, for vision models
+curl -X POST https://doc-upload.example.com/v1/convert/file?mode=images \
+    -H "Authorization: Bearer $API_KEY" \
+    -F "files=@document.pdf"
+
+# Raw mode — text layer only, instant
+curl -X POST https://doc-upload.example.com/v1/convert/file?mode=raw \
+    -H "Authorization: Bearer $API_KEY" \
+    -F "files=@document.pdf"
+```
+
+### `GET /health`
+
+Returns service health status.
+
+```json
+{"status": "ok", "router": true, "sidecar": true, "vlm": true}
+```
+
+### `GET /metrics`
+
+Prometheus metrics: `router_requests_total`, `router_duration_seconds`, `router_active_requests`, `router_errors_total`.
+
+## Supported formats
+
+| Format | Extension | Extraction method |
+|--------|-----------|-------------------|
+| PDF (born-digital) | `.pdf` | PyMuPDF text extraction |
+| PDF (scanned) | `.pdf` | Page rendering → VLM OCR |
+| Word | `.docx` | python-docx (headings, tables, lists, formatting) |
+| PowerPoint | `.pptx` | python-pptx (slides, tables, notes) |
+| HTML | `.html`, `.htm` | BeautifulSoup (headings, tables, lists, code) |
+| Excel | `.xlsx`, `.xls` | openpyxl (sheets as markdown tables) |
+| CSV | `.csv` | Auto-dialect detection, markdown table |
+| Markdown | `.md` | Passthrough |
+| Images | `.png`, `.jpg`, etc. | VLM OCR or passthrough |
+| Text | `.txt`, `.json`, `.xml`, `.yaml` | Passthrough |
 
 ## Configuration
 
-### Router environment variables
+### Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DOCLING_URL` | `http://localhost:5001` | Docling-serve URL |
-| `ROUTER_PORT` | `5000` | Router listen port |
-| `CHUNK_PAGES` | `3` | Pages per chunk when splitting |
-| `SPLIT_THRESHOLD` | `6` | Min pages before splitting kicks in |
-| `LOG_LEVEL` | `INFO` | Log level |
+| `TINFOIL_API_KEY` | (required, secret) | API key for Tinfoil VLM calls |
+| `VLM_MODEL` | `gemma4-31b` | Model name for VLM calls via Tinfoil SDK |
+| `SIDECAR_URL` | `http://localhost:5002` | Python sidecar URL (internal) |
+| `ROUTER_PORT` | `5000` | Go router listen port |
+| `MAX_FILE_SIZE_MB` | `50` | Max file size per upload |
+| `MAX_FILES` | `10` | Max files per request |
+| `MAX_PARALLEL` | `32` | Max concurrent VLM calls |
 
-### Docling-serve environment variables
+### Limits
 
-See `tinfoil-config.yml` for the full list. Key settings:
-- `UVICORN_WORKERS=8` — parallel worker processes
-- `DOCLING_SERVE_LAYOUT_BATCH_SIZE=16` — GPU batch size
-- `DOCLING_SERVE_MAX_FILE_SIZE=52428800` — 50MB limit
-- `DOCLING_SERVE_MAX_NUM_PAGES=200` — page limit
+- Max 200 pages per PDF
+- Max 50MB per file
+- Max 10 files per request
+- Sidecar response capped at 512MB
+
+## Security
+
+- **Zero persistent state** — all processing is in-memory, request-scoped. No disk writes, no caches, no database.
+- **No cross-request leakage** — file data lives only in Go/Python memory until GC. No filenames in API responses.
+- **Attested VLM calls** — Tinfoil SDK verifies remote enclave identity before sending document images.
+- **Sanitized errors** — generic error messages to clients, details logged server-side only.
+- **Request timeouts** — ReadTimeout 5min, IdleTimeout 2min. No WriteTimeout (VLM calls can be long).
+- **Sidecar isolated** — binds to 127.0.0.1, not externally accessible.
 
 ## Local development
 
 ```bash
-# Build router image
-docker build -t doc-upload-router ./router
+# Build
+docker build -t doc-upload .
 
-# Run the stack
-docker run -d --name doc-upload --network host --gpus all --runtime nvidia \
-    -e UVICORN_WORKERS=8 \
-    -e DOCLING_SERVE_LAYOUT_BATCH_SIZE=16 \
-    -e DOCLING_SERVE_TABLE_BATCH_SIZE=16 \
-    -e DOCLING_SERVE_OCR_BATCH_SIZE=16 \
-    -e DOCLING_SERVE_ENG_LOC_NUM_WORKERS=1 \
-    ghcr.io/docling-project/docling-serve-cu130:v1.15.0
-
-docker run -d --name doc-router --network host \
-    -e DOCLING_URL=http://localhost:5001 \
-    doc-upload-router
+# Run
+docker run -d --name doc-upload --network host \
+    -e TINFOIL_API_KEY=your-key \
+    -e VLM_MODEL=gemma4-31b \
+    doc-upload
 
 # Test
-curl -X POST http://localhost:5000/v1/convert/file \
-    -F "files=@document.pdf" \
-    -F 'options={"to_formats":["md"]}'
+curl -F "files=@test.pdf" http://localhost:5000/v1/convert/file?mode=raw
+```
+
+## Deployment
+
+Runs as a single container on a Tinfoil CVM. No GPU required. See `tinfoil-config.yml` for the production configuration.
+
+```yaml
+cvm-version: 0.7.5
+cpus: 4
+memory: 8192
+
+containers:
+  - name: "doc-upload"
+    image: "ghcr.io/tinfoilsh/confidential-doc-upload@sha256:..."
+    env:
+      - VLM_MODEL: "gemma4-31b"
+    secrets:
+      - TINFOIL_API_KEY
 ```
