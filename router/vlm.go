@@ -89,7 +89,54 @@ func vlmCall(ctx context.Context, imageB64, prompt string, maxTokens int) (strin
 		}
 	}
 	md = strings.TrimSuffix(strings.TrimRight(md, "\n"), "```")
+	md = truncateRepetition(md)
 	return md, nil
+}
+
+// truncateRepetition removes repetition loops from VLM output while preserving
+// content before and after each loop. Single left-to-right scan: at each byte
+// position, check all window sizes for 3+ consecutive repeats. When found,
+// excise the repeated block and continue from the same position.
+func truncateRepetition(s string) string {
+	const minWindow = 10
+	const maxWindow = 200
+	const minRepeats = 3
+
+	b := []byte(s)
+	changed := false
+	i := 0
+	for i+minWindow*minRepeats <= len(b) {
+		bestLen := 0
+		for window := minWindow; window <= maxWindow && i+window*minRepeats <= len(b); window++ {
+			repeats := 1
+			for j := i + window; j+window <= len(b); j += window {
+				if string(b[j:j+window]) == string(b[i:i+window]) {
+					repeats++
+				} else {
+					break
+				}
+			}
+			if repeats >= minRepeats {
+				blockLen := window * repeats
+				if blockLen > bestLen {
+					bestLen = blockLen
+				}
+			}
+		}
+		if bestLen > 0 {
+			slog.Warn("excised VLM repetition loop",
+				"at_byte", i, "removed_bytes", bestLen, "text_len", len(b))
+			b = append(b[:i], b[i+bestLen:]...)
+			changed = true
+		} else {
+			i++
+		}
+	}
+
+	if changed {
+		return strings.TrimSpace(string(b))
+	}
+	return s
 }
 
 func vlmFullPageOCR(ctx context.Context, imageB64 string) (string, error) {
