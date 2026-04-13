@@ -72,7 +72,9 @@ func vlmCall(ctx context.Context, imageB64, prompt string, maxTokens int) (strin
 				openai.TextContentPart(prompt),
 			}),
 		},
-		MaxTokens: openai.Int(int64(maxTokens)),
+		MaxTokens:        openai.Int(int64(maxTokens)),
+		FrequencyPenalty: openai.Float(0.5),
+		Temperature:      openai.Float(0.2),
 	})
 	if err != nil {
 		return "", fmt.Errorf("vlm: %w", err)
