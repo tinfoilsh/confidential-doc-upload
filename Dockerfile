@@ -18,9 +18,6 @@ RUN pip install --no-cache-dir \
 
 COPY --from=go-builder /app/router /usr/local/bin/router
 COPY sidecar/app.py /app/sidecar/app.py
-COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
-
 EXPOSE 5000 5002
 
-ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["bash", "-c", "uvicorn sidecar.app:app --host 127.0.0.1 --port 5002 --workers 2 --app-dir /app & /usr/local/bin/router & wait -n"]
