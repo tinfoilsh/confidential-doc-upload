@@ -161,8 +161,8 @@ func buildSpans(chars []mupdf.TextChar) []Span {
 		return nil
 	}
 
-	// Compute median font size for superscript detection
 	medianSize := medianFontSize(chars)
+	medianBL := medianBaseline(chars)
 
 	var spans []Span
 	var cur Span
@@ -170,13 +170,13 @@ func buildSpans(chars []mupdf.TextChar) []Span {
 	cur.Italic = chars[0].Italic
 	cur.Mono = chars[0].Mono
 	cur.Strikeout = chars[0].Strikeout
-	cur.Superscript = isSuperscript(chars[0], medianSize)
+	cur.Superscript = isSuperscript(chars[0], medianSize, medianBL)
 	cur.Size = chars[0].Size
 	cur.X0 = chars[0].Origin[0]
 
 	var buf strings.Builder
 	for _, ch := range chars {
-		isSuper := isSuperscript(ch, medianSize)
+		isSuper := isSuperscript(ch, medianSize, medianBL)
 		sameStyle := ch.Bold == cur.Bold && ch.Italic == cur.Italic &&
 			ch.Mono == cur.Mono && ch.Strikeout == cur.Strikeout &&
 			isSuper == cur.Superscript
@@ -205,8 +205,28 @@ func buildSpans(chars []mupdf.TextChar) []Span {
 	return spans
 }
 
-func isSuperscript(ch mupdf.TextChar, medianSize float64) bool {
-	return medianSize > 0 && ch.Size < medianSize*0.75
+// isSuperscript detects superscripts by requiring BOTH:
+// 1. Font size significantly smaller than the line median (<75%)
+// 2. Baseline (origin.y) higher than the line median baseline (lower y value)
+func isSuperscript(ch mupdf.TextChar, medianSize float64, medianBaseline float64) bool {
+	if medianSize <= 0 {
+		return false
+	}
+	smallerFont := ch.Size < medianSize*0.75
+	higherBaseline := medianBaseline > 0 && ch.Origin[1] < medianBaseline-1
+	return smallerFont && higherBaseline
+}
+
+func medianBaseline(chars []mupdf.TextChar) float64 {
+	if len(chars) == 0 {
+		return 0
+	}
+	baselines := make([]float64, len(chars))
+	for i, ch := range chars {
+		baselines[i] = ch.Origin[1]
+	}
+	sort.Float64s(baselines)
+	return baselines[len(baselines)/2]
 }
 
 func medianFontSize(chars []mupdf.TextChar) float64 {

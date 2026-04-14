@@ -20,9 +20,9 @@ fz_document* mupdf_open_document(fz_context *ctx, const void *data, size_t len, 
         if (buf) fz_drop_buffer(ctx, buf);
         return NULL;
     }
-    /* Buffer ownership stays with Go (shared data, not copied).
-       The document holds a reference to the buffer internally.
-       Go must keep the []byte alive for the document's lifetime. */
+    /* Drop our reference; the document keeps its own.
+       The underlying data is Go-managed (CBytes), freed in Document.Close(). */
+    fz_drop_buffer(ctx, buf);
     return doc;
 }
 

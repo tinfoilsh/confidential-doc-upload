@@ -31,9 +31,9 @@ func main() {
 	dpi := flag.Int("dpi", 100, "DPI for page rendering")
 	flag.Parse()
 
-	// Use Go's soft memory limit (GOMEMLIMIT) for defense in depth.
-	// This is Go-aware and doesn't break the runtime like RLIMIT_AS does.
-	// The router also sets a hard 120s timeout.
+	// GOMEMLIMIT only bounds Go heap allocations, not CGo/MuPDF memory.
+	// Combined with the 120s router timeout and process-per-request model,
+	// this provides defense in depth against memory exhaustion.
 	debug.SetMemoryLimit(512 * 1024 * 1024)
 
 	data, err := io.ReadAll(os.Stdin)
