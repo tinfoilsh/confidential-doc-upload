@@ -54,8 +54,9 @@ type Page struct {
 }
 
 type Document struct {
-	ctx *C.fz_context
-	doc *C.fz_document
+	ctx   *C.fz_context
+	doc   *C.fz_document
+	cdata unsafe.Pointer // C-allocated copy of PDF bytes, freed on Close
 }
 
 func OpenFromBytes(data []byte) (*Document, error) {
@@ -64,20 +65,29 @@ func OpenFromBytes(data []byte) (*Document, error) {
 		return nil, fmt.Errorf("mupdf: failed to create context")
 	}
 
+	// Copy data to C memory so MuPDF can safely access it during
+	// lazy page loading and PDF repair (Go GC must not move it).
+	cdata := C.CBytes(data)
+
 	var errcode C.int
-	doc := C.mupdf_open_document(ctx, unsafe.Pointer(&data[0]), C.size_t(len(data)), &errcode)
+	doc := C.mupdf_open_document(ctx, cdata, C.size_t(len(data)), &errcode)
 	if errcode != 0 || doc == nil {
+		C.free(cdata)
 		C.fz_drop_context(ctx)
 		return nil, fmt.Errorf("mupdf: failed to open document")
 	}
 
-	return &Document{ctx: ctx, doc: doc}, nil
+	return &Document{ctx: ctx, doc: doc, cdata: cdata}, nil
 }
 
 func (d *Document) Close() {
 	if d.doc != nil {
 		C.fz_drop_document(d.ctx, d.doc)
 		d.doc = nil
+	}
+	if d.cdata != nil {
+		C.free(d.cdata)
+		d.cdata = nil
 	}
 	if d.ctx != nil {
 		C.fz_drop_context(d.ctx)
