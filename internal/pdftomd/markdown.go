@@ -8,18 +8,15 @@ import (
 
 const scannedThreshold = 50
 
-// PageResult holds the markdown output and metadata for one page.
 type PageResult struct {
 	Markdown  string `json:"md_content"`
 	IsScanned bool   `json:"is_scanned"`
 	PageNum   int    `json:"page"`
 }
 
-// ConvertDocument converts all pages of a document to markdown.
 func ConvertDocument(doc *mupdf.Document) ([]PageResult, error) {
 	nPages := doc.PageCount()
 
-	// First pass: extract all pages to build the header map
 	pages := make([]*mupdf.Page, nPages)
 	for i := 0; i < nPages; i++ {
 		p, err := doc.ExtractPage(i)
@@ -32,7 +29,6 @@ func ConvertDocument(doc *mupdf.Document) ([]PageResult, error) {
 
 	headers := BuildHeaderMap(pages, 12)
 
-	// Second pass: convert each page to markdown
 	results := make([]PageResult, nPages)
 	for i, page := range pages {
 		md := pageToMarkdown(page, headers)
@@ -56,6 +52,7 @@ func pageToMarkdown(page *mupdf.Page, headers HeaderMap) string {
 	inCode := false
 	prevHeaderPrefix := ""
 	var prevBBox mupdf.Rect
+	prevWasJoinable := false
 
 	for _, vl := range lines {
 		lineText := lineRawText(vl)
@@ -67,17 +64,28 @@ func pageToMarkdown(page *mupdf.Page, headers HeaderMap) string {
 		allItalic := allSpansHaveStyle(vl.Spans, func(s Span) bool { return s.Italic })
 		allMono := allSpansHaveStyle(vl.Spans, func(s Span) bool { return s.Mono })
 
-		// Determine header prefix from font size
 		headerPrefix := ""
 		if len(vl.Spans) > 0 {
 			headerPrefix = headers.GetHeaderPrefix(vl.Spans[0].Size)
 		}
+
+		firstRune := firstNonSpaceRune(lineText)
+		isBullet := IsBullet(firstRune)
+
+		// Determine if this line continues the previous paragraph
+		// (same block, small y-gap, not a header/bullet/code, not starting a new section)
+		isJoinable := headerPrefix == "" && !allMono && !isBullet &&
+			vl.BlockNo == prevBlockNo && prevBBox.Y1 > 0 &&
+			vl.BBox.Y0-prevBBox.Y1 <= vl.BBox.Height()*0.3
 
 		// Header line
 		if headerPrefix != "" {
 			if inCode {
 				out.WriteString("```\n")
 				inCode = false
+			}
+			if prevWasJoinable {
+				out.WriteString("\n")
 			}
 			text := strings.TrimSpace(lineText)
 			if allBold {
@@ -86,7 +94,6 @@ func pageToMarkdown(page *mupdf.Page, headers HeaderMap) string {
 			if allItalic {
 				text = "_" + text + "_"
 			}
-			// Multi-line header continuation
 			if headerPrefix == prevHeaderPrefix && prevBBox.Y1 > 0 &&
 				vl.BBox.Y0-prevBBox.Y1 < vl.BBox.Height()*0.5 {
 				trimTrailingNewlines(&out)
@@ -97,12 +104,16 @@ func pageToMarkdown(page *mupdf.Page, headers HeaderMap) string {
 			prevHeaderPrefix = headerPrefix
 			prevBBox = vl.BBox
 			prevBlockNo = vl.BlockNo
+			prevWasJoinable = false
 			continue
 		}
 		prevHeaderPrefix = ""
 
 		// Code block (all mono-spaced)
 		if allMono {
+			if prevWasJoinable {
+				out.WriteString("\n")
+			}
 			if !inCode {
 				out.WriteString("\n```\n")
 				inCode = true
@@ -110,6 +121,7 @@ func pageToMarkdown(page *mupdf.Page, headers HeaderMap) string {
 			out.WriteString(lineText + "\n")
 			prevBBox = vl.BBox
 			prevBlockNo = vl.BlockNo
+			prevWasJoinable = false
 			continue
 		}
 
@@ -118,40 +130,52 @@ func pageToMarkdown(page *mupdf.Page, headers HeaderMap) string {
 			inCode = false
 		}
 
-		// Paragraph break detection
-		if vl.BlockNo != prevBlockNo && prevBlockNo >= 0 {
-			out.WriteString("\n")
-		} else if prevBBox.Y1 > 0 && vl.BBox.Y0-prevBBox.Y1 > vl.BBox.Height()*0.5 {
-			out.WriteString("\n")
+		// Join continuation lines within the same paragraph
+		if isJoinable && prevWasJoinable {
+			text := strings.TrimSpace(lineText)
+			// Emit with per-span formatting for the continuation
+			out.WriteString(" ")
+			writeFormattedSpans(&out, vl.Spans)
+			prevBBox = vl.BBox
+			prevBlockNo = vl.BlockNo
+			prevWasJoinable = true
+			_ = text
+			continue
 		}
 
-		// Check for bullet
-		firstRune := firstNonSpaceRune(lineText)
-		if IsBullet(firstRune) {
+		// Paragraph break
+		if prevBlockNo >= 0 {
+			if prevWasJoinable {
+				out.WriteString("\n")
+			}
+			if vl.BlockNo != prevBlockNo {
+				out.WriteString("\n")
+			} else if prevBBox.Y1 > 0 && vl.BBox.Y0-prevBBox.Y1 > vl.BBox.Height()*0.5 {
+				out.WriteString("\n")
+			}
+		}
+
+		// Bullet
+		if isBullet {
 			charWidth := vl.BBox.Width() / float64(max(len(lineText), 1))
 			formatted := FormatBulletLine(lineText, vl.BBox.X0, page.MediaBox.X0, charWidth)
 			out.WriteString(formatted + "\n")
 			prevBBox = vl.BBox
 			prevBlockNo = vl.BlockNo
+			prevWasJoinable = false
 			continue
 		}
 
-		// Regular line with per-span formatting
-		for i, sp := range vl.Spans {
-			formatted := FormatSpan(sp)
-			if formatted != "" {
-				if i > 0 {
-					out.WriteString(" ")
-				}
-				out.WriteString(formatted)
-			}
-		}
-		out.WriteString("\n")
-
+		// Regular line - emit with per-span formatting
+		writeFormattedSpans(&out, vl.Spans)
 		prevBBox = vl.BBox
 		prevBlockNo = vl.BlockNo
+		prevWasJoinable = !isBullet && headerPrefix == "" && !allMono
 	}
 
+	if prevWasJoinable {
+		out.WriteString("\n")
+	}
 	if inCode {
 		out.WriteString("```\n")
 	}
@@ -160,6 +184,18 @@ func pageToMarkdown(page *mupdf.Page, headers HeaderMap) string {
 	result = strings.ReplaceAll(result, " \n", "\n")
 	result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
 	return strings.TrimSpace(result)
+}
+
+func writeFormattedSpans(out *strings.Builder, spans []Span) {
+	for i, sp := range spans {
+		formatted := FormatSpan(sp)
+		if formatted != "" {
+			if i > 0 {
+				out.WriteString(" ")
+			}
+			out.WriteString(formatted)
+		}
+	}
 }
 
 func lineRawText(vl VisualLine) string {

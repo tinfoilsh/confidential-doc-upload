@@ -1,6 +1,7 @@
 package pdftomd
 
 import (
+	"math"
 	"sort"
 	"strings"
 
@@ -74,9 +75,27 @@ func ReconstructLines(page *mupdf.Page, tolerance float64) []VisualLine {
 			return group[i].bbox.X0 < group[j].bbox.X0
 		})
 
-		vl := VisualLine{BlockNo: group[0].blockNo}
-		var allChars []mupdf.TextChar
+		// Deduplicate overlapping spans (same position = same text rendered twice)
+		var deduped []rawSpan
 		for _, sp := range group {
+			isDupe := false
+			for _, existing := range deduped {
+				if math.Abs(sp.bbox.X0-existing.bbox.X0) < 1 &&
+					math.Abs(sp.bbox.Y0-existing.bbox.Y0) < 1 &&
+					len(sp.chars) > 0 && len(existing.chars) > 0 &&
+					sp.chars[0].Rune == existing.chars[0].Rune {
+					isDupe = true
+					break
+				}
+			}
+			if !isDupe {
+				deduped = append(deduped, sp)
+			}
+		}
+
+		vl := VisualLine{BlockNo: deduped[0].blockNo}
+		var allChars []mupdf.TextChar
+		for _, sp := range deduped {
 			allChars = append(allChars, sp.chars...)
 			vl.BBox = unionRect(vl.BBox, sp.bbox)
 		}
