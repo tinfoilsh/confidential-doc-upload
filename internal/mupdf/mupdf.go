@@ -21,14 +21,16 @@ func (r Rect) Width() float64  { return r.X1 - r.X0 }
 func (r Rect) Height() float64 { return r.Y1 - r.Y0 }
 
 type TextChar struct {
-	Rune     rune
-	Origin   [2]float64
-	Size     float64
-	FontName string
-	Bold     bool
-	Italic   bool
-	Mono     bool
-	Color    int
+	Rune      rune
+	Origin    [2]float64
+	Size      float64
+	FontName  string
+	Bold      bool
+	Italic    bool
+	Mono      bool
+	Strikeout bool
+	Color     int
+	Flags     int // raw MuPDF char flags
 }
 
 type TextLine struct {
@@ -95,7 +97,7 @@ func (d *Document) ExtractPage(pageNum int) (*Page, error) {
 	}
 	defer C.fz_drop_page(d.ctx, cpage)
 
-	flags := C.FZ_STEXT_PRESERVE_WHITESPACE | C.FZ_STEXT_PRESERVE_LIGATURES
+	flags := C.FZ_STEXT_PRESERVE_WHITESPACE | C.FZ_STEXT_PRESERVE_LIGATURES | C.FZ_STEXT_COLLECT_STYLES
 	stext := C.mupdf_extract_stext(d.ctx, cpage, C.int(flags), &errcode)
 	if errcode != 0 || stext == nil {
 		return nil, fmt.Errorf("mupdf: failed to extract text from page %d", pageNum)
@@ -136,15 +138,22 @@ func (d *Document) ExtractPage(pageNum int) (*Page, error) {
 						mono = C.fz_font_is_monospaced(d.ctx, font) != 0
 					}
 
+					charFlags := int(ch.flags)
+					// Use per-char BOLD flag if available (from FZ_STEXT_COLLECT_STYLES)
+					charBold := bold || (charFlags&8 != 0) // FZ_STEXT_BOLD = 8
+					charStrikeout := charFlags&1 != 0      // FZ_STEXT_STRIKEOUT = 1
+
 					tc := TextChar{
-						Rune:     rune(ch.c),
-						Origin:   [2]float64{float64(ch.origin.x), float64(ch.origin.y)},
-						Size:     float64(ch.size),
-						FontName: fontName,
-						Bold:     bold,
-						Italic:   italic,
-						Mono:     mono,
-						Color:    int(ch.argb),
+						Rune:      rune(ch.c),
+						Origin:    [2]float64{float64(ch.origin.x), float64(ch.origin.y)},
+						Size:      float64(ch.size),
+						FontName:  fontName,
+						Bold:      charBold,
+						Italic:    italic,
+						Mono:      mono,
+						Strikeout: charStrikeout,
+						Color:     int(ch.argb),
+						Flags:     charFlags,
 					}
 					tl.Chars = append(tl.Chars, tc)
 					page.CharCount++
