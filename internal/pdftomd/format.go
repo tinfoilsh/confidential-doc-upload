@@ -69,10 +69,12 @@ func FormatSpan(s Span) string {
 
 // FormatBulletLine converts a bullet-prefixed line to markdown list syntax.
 func FormatBulletLine(text string, xOffset float64, clipX0 float64, charWidth float64) string {
-	if len(text) < 2 {
+	// Skip the first rune (the bullet character), not the first byte
+	runes := []rune(text)
+	if len(runes) < 2 {
 		return text
 	}
-	rest := strings.TrimLeft(text[1:], " ")
+	rest := strings.TrimLeft(string(runes[1:]), " ")
 	mdText := "- " + rest
 	mdText = strings.ReplaceAll(mdText, "  ", " ")
 
