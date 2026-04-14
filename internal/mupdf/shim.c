@@ -184,3 +184,59 @@ fz_buffer* mupdf_render_page_png(fz_context *ctx, fz_page *page, float zoom, int
     fz_drop_pixmap(ctx, pix);
     return buf;
 }
+
+/* Combined extraction: text + line segments in a single page render.
+   Runs page once into a display list, replays to both stext and line trace devices. */
+fz_stext_page* mupdf_extract_all(fz_context *ctx, fz_page *page, int stext_flags,
+    mupdf_line_segment *seg_out, int seg_max, int *seg_count, int *errcode)
+{
+    fz_stext_page *tp = NULL;
+    fz_display_list *list = NULL;
+    fz_device *list_dev = NULL;
+    fz_device *stext_dev = NULL;
+    fz_stext_options opts = { stext_flags };
+    *errcode = 0;
+    *seg_count = 0;
+
+    fz_try(ctx) {
+        fz_rect mediabox = fz_bound_page(ctx, page);
+
+        /* Run page once into display list */
+        list = fz_new_display_list(ctx, mediabox);
+        list_dev = fz_new_list_device(ctx, list);
+        fz_run_page_contents(ctx, page, list_dev, fz_identity, NULL);
+        fz_close_device(ctx, list_dev);
+        fz_drop_device(ctx, list_dev);
+        list_dev = NULL;
+
+        /* Replay to stext device */
+        tp = fz_new_stext_page(ctx, mediabox);
+        stext_dev = fz_new_stext_device(ctx, tp, &opts);
+        fz_run_display_list(ctx, list, stext_dev, fz_identity, fz_infinite_rect, NULL);
+        fz_close_device(ctx, stext_dev);
+        fz_drop_device(ctx, stext_dev);
+        stext_dev = NULL;
+
+        /* Replay to line trace device */
+        line_trace_device trace_dev;
+        memset(&trace_dev, 0, sizeof(trace_dev));
+        trace_dev.ws.segments = seg_out;
+        trace_dev.ws.max = seg_max;
+        trace_dev.ws.count = 0;
+        trace_dev.ws.snap_tol = 3.0f;
+        trace_dev.super.stroke_path = dev_stroke_path;
+        fz_run_display_list(ctx, list, &trace_dev.super, fz_identity, fz_infinite_rect, NULL);
+        *seg_count = trace_dev.ws.count;
+
+        fz_drop_display_list(ctx, list);
+    }
+    fz_catch(ctx) {
+        *errcode = 1;
+        if (stext_dev) fz_drop_device(ctx, stext_dev);
+        if (list_dev) fz_drop_device(ctx, list_dev);
+        if (list) fz_drop_display_list(ctx, list);
+        if (tp) fz_drop_stext_page(ctx, tp);
+        return NULL;
+    }
+    return tp;
+}

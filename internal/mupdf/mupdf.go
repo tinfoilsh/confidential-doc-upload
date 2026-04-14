@@ -54,10 +54,11 @@ type TextBlock struct {
 }
 
 type Page struct {
-	Blocks    []TextBlock
-	MediaBox  Rect
-	PageNum   int
-	CharCount int
+	Blocks       []TextBlock
+	LineSegments []LineSegment
+	MediaBox     Rect
+	PageNum      int
+	CharCount    int
 }
 
 type Document struct {
@@ -106,7 +107,12 @@ func (d *Document) PageCount() int {
 	return int(C.mupdf_count_pages(d.ctx, d.doc))
 }
 
+// ExtractPage extracts text and line segments from a page in a single pass.
 func (d *Document) ExtractPage(pageNum int) (*Page, error) {
+	return d.extractPage(pageNum, true)
+}
+
+func (d *Document) extractPage(pageNum int, withLineSegments bool) (*Page, error) {
 	var errcode C.int
 	cpage := C.mupdf_load_page(d.ctx, d.doc, C.int(pageNum), &errcode)
 	if errcode != 0 || cpage == nil {
@@ -115,7 +121,19 @@ func (d *Document) ExtractPage(pageNum int) (*Page, error) {
 	defer C.fz_drop_page(d.ctx, cpage)
 
 	flags := C.FZ_STEXT_PRESERVE_WHITESPACE | C.FZ_STEXT_PRESERVE_LIGATURES | C.FZ_STEXT_COLLECT_STYLES
-	stext := C.mupdf_extract_stext(d.ctx, cpage, C.int(flags), &errcode)
+
+	const maxSegments = 10000
+	var segments []C.mupdf_line_segment
+	var segCount C.int
+	var stext *C.fz_stext_page
+
+	if withLineSegments {
+		segments = make([]C.mupdf_line_segment, maxSegments)
+		stext = C.mupdf_extract_all(d.ctx, cpage, C.int(flags),
+			&segments[0], C.int(maxSegments), &segCount, &errcode)
+	} else {
+		stext = C.mupdf_extract_stext(d.ctx, cpage, C.int(flags), &errcode)
+	}
 	if errcode != 0 || stext == nil {
 		return nil, fmt.Errorf("mupdf: failed to extract text from page %d", pageNum)
 	}
@@ -193,6 +211,20 @@ func (d *Document) ExtractPage(pageNum int) (*Page, error) {
 			}
 		}
 		page.Blocks = append(page.Blocks, tb)
+	}
+
+	// Populate line segments from the combined extraction
+	if withLineSegments && segCount > 0 {
+		for i := 0; i < int(segCount); i++ {
+			s := segments[i]
+			page.LineSegments = append(page.LineSegments, LineSegment{
+				X0:           float64(s.x0),
+				Y0:           float64(s.y0),
+				X1:           float64(s.x1),
+				Y1:           float64(s.y1),
+				IsHorizontal: int(s.is_horizontal),
+			})
+		}
 	}
 
 	return page, nil

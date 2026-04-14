@@ -27,4 +27,7 @@ typedef struct {
 int mupdf_extract_line_segments(fz_context *ctx, fz_page *page,
     mupdf_line_segment *out, int max_segments, int *errcode);
 
+fz_stext_page* mupdf_extract_all(fz_context *ctx, fz_page *page, int stext_flags,
+    mupdf_line_segment *seg_out, int seg_max, int *seg_count, int *errcode);
+
 #endif
