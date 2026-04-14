@@ -153,6 +153,7 @@ func buildSpans(chars []mupdf.TextChar) []Span {
 	cur.Bold = chars[0].Bold
 	cur.Italic = chars[0].Italic
 	cur.Mono = chars[0].Mono
+	cur.Strikeout = chars[0].Strikeout
 	cur.Superscript = isSuperscript(chars[0], medianSize)
 	cur.Size = chars[0].Size
 	cur.X0 = chars[0].Origin[0]
@@ -161,7 +162,8 @@ func buildSpans(chars []mupdf.TextChar) []Span {
 	for _, ch := range chars {
 		isSuper := isSuperscript(ch, medianSize)
 		sameStyle := ch.Bold == cur.Bold && ch.Italic == cur.Italic &&
-			ch.Mono == cur.Mono && isSuper == cur.Superscript
+			ch.Mono == cur.Mono && ch.Strikeout == cur.Strikeout &&
+			isSuper == cur.Superscript
 		if !sameStyle {
 			cur.Text = buf.String()
 			if cur.Text != "" {
@@ -172,6 +174,7 @@ func buildSpans(chars []mupdf.TextChar) []Span {
 				Bold:        ch.Bold,
 				Italic:      ch.Italic,
 				Mono:        ch.Mono,
+				Strikeout:   ch.Strikeout,
 				Superscript: isSuper,
 				Size:        ch.Size,
 				X0:          ch.Origin[0],

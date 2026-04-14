@@ -24,6 +24,7 @@ type Span struct {
 	Bold        bool
 	Italic      bool
 	Mono        bool
+	Strikeout   bool
 	Superscript bool
 	Size        float64
 	X0          float64
@@ -45,6 +46,7 @@ func FormatSpan(s Span) string {
 	prefix := ""
 	suffix := ""
 
+	// Nesting order (outside to inside): strikeout, italic, bold, mono
 	if s.Mono {
 		prefix = "`" + prefix
 		suffix += "`"
@@ -56,6 +58,10 @@ func FormatSpan(s Span) string {
 	if s.Italic {
 		prefix = "_" + prefix
 		suffix += "_"
+	}
+	if s.Strikeout {
+		prefix = "~~" + prefix
+		suffix += "~~"
 	}
 
 	return prefix + text + suffix
