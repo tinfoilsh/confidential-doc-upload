@@ -44,7 +44,6 @@ func ConvertDocument(doc *mupdf.Document) ([]PageResult, error) {
 func pageToMarkdown(page *mupdf.Page, headers HeaderMap) string {
 	columns := columnBoxes(page, 0, 0)
 
-	// If column detection found regions, extract per column
 	if len(columns) > 0 {
 		var parts []string
 		for _, col := range columns {
@@ -57,10 +56,16 @@ func pageToMarkdown(page *mupdf.Page, headers HeaderMap) string {
 		return strings.TrimSpace(result)
 	}
 
-	// Fallback: process whole page
 	return columnToMarkdown(page, headers, page.MediaBox)
 }
 
+// columnToMarkdown converts text within a clip region to markdown.
+// Follows pymupdf4llm's write_text logic:
+// - Each line gets \n at the end
+// - Block change adds \n (paragraph break)
+// - Y-gap > 1.5x line height adds \n
+// - Bullets and bracket-starts add \n
+// - Superscript starts add \n
 func columnToMarkdown(page *mupdf.Page, headers HeaderMap, clip mupdf.Rect) string {
 	lines := ReconstructLinesInClip(page, 3, clip)
 	if len(lines) == 0 {
@@ -72,7 +77,6 @@ func columnToMarkdown(page *mupdf.Page, headers HeaderMap, clip mupdf.Rect) stri
 	inCode := false
 	prevHeaderPrefix := ""
 	var prevBBox mupdf.Rect
-	prevWasJoinable := false
 
 	for _, vl := range lines {
 		lineText := lineRawText(vl)
@@ -89,31 +93,23 @@ func columnToMarkdown(page *mupdf.Page, headers HeaderMap, clip mupdf.Rect) stri
 			headerPrefix = headers.GetHeaderPrefix(vl.Spans[0].Size)
 		}
 
-		firstRune := firstNonSpaceRune(lineText)
-		isBullet := IsBullet(firstRune)
-
-		// Determine if this line continues the previous paragraph
-		// (same block, small y-gap, not a header/bullet/code, not starting a new section)
-		isJoinable := headerPrefix == "" && !allMono && !isBullet &&
-			vl.BlockNo == prevBlockNo && prevBBox.Y1 > 0 &&
-			vl.BBox.Y0-prevBBox.Y1 <= vl.BBox.Height()*0.3
-
-		// Header line
+		// === Header line ===
 		if headerPrefix != "" {
 			if inCode {
 				out.WriteString("```\n")
 				inCode = false
 			}
-			if prevWasJoinable {
-				out.WriteString("\n")
-			}
 			text := strings.TrimSpace(lineText)
-			if allBold {
-				text = "**" + text + "**"
+			if allMono {
+				text = "`" + text + "`"
 			}
 			if allItalic {
 				text = "_" + text + "_"
 			}
+			if allBold {
+				text = "**" + text + "**"
+			}
+			// Multi-line header continuation
 			if headerPrefix == prevHeaderPrefix && prevBBox.Y1 > 0 &&
 				vl.BBox.Y0-prevBBox.Y1 < vl.BBox.Height()*0.5 {
 				trimTrailingNewlines(&out)
@@ -124,98 +120,91 @@ func columnToMarkdown(page *mupdf.Page, headers HeaderMap, clip mupdf.Rect) stri
 			prevHeaderPrefix = headerPrefix
 			prevBBox = vl.BBox
 			prevBlockNo = vl.BlockNo
-			prevWasJoinable = false
 			continue
 		}
 		prevHeaderPrefix = ""
 
-		// Code block (all mono-spaced)
+		// === Code block (all mono-spaced) ===
 		if allMono {
-			if prevWasJoinable {
-				out.WriteString("\n")
-			}
 			if !inCode {
-				out.WriteString("\n```\n")
+				out.WriteString("```\n")
 				inCode = true
 			}
-			out.WriteString(lineText + "\n")
+			// Approximate indentation from x-offset
+			if len(vl.Spans) > 0 && vl.Spans[0].Size > 0 {
+				delta := int((vl.BBox.X0 - clip.X0) / (vl.Spans[0].Size * 0.5))
+				if delta > 0 {
+					out.WriteString(strings.Repeat(" ", delta))
+				}
+			}
+			out.WriteString(strings.TrimSpace(lineText) + "\n")
 			prevBBox = vl.BBox
 			prevBlockNo = vl.BlockNo
-			prevWasJoinable = false
 			continue
 		}
 
 		if inCode {
-			out.WriteString("```\n\n")
+			out.WriteString("```\n")
 			inCode = false
 		}
 
-		// Join continuation lines within the same paragraph
-		if isJoinable && prevWasJoinable {
-			text := strings.TrimSpace(lineText)
-			// Emit with per-span formatting for the continuation
-			out.WriteString(" ")
-			writeFormattedSpans(&out, vl.Spans)
-			prevBBox = vl.BBox
+		// === Paragraph break detection (matches pymupdf4llm) ===
+		// Block number change = new paragraph
+		if vl.BlockNo != prevBlockNo && prevBlockNo >= 0 {
+			out.WriteString("\n")
 			prevBlockNo = vl.BlockNo
-			prevWasJoinable = true
-			_ = text
-			continue
 		}
 
-		// Paragraph break
-		if prevBlockNo >= 0 {
-			if prevWasJoinable {
-				out.WriteString("\n")
-			}
-			if vl.BlockNo != prevBlockNo {
-				out.WriteString("\n")
-			} else if prevBBox.Y1 > 0 && vl.BBox.Y0-prevBBox.Y1 > vl.BBox.Height()*0.5 {
-				out.WriteString("\n")
-			}
+		// Additional line break conditions
+		firstSpan := vl.Spans[0]
+		needBreak := false
+		if prevBBox.Y1 > 0 && vl.BBox.Y1-prevBBox.Y1 > vl.BBox.Height()*1.5 {
+			needBreak = true
 		}
-
-		// Bullet
-		if isBullet {
-			charWidth := vl.BBox.Width() / float64(max(len(lineText), 1))
-			formatted := FormatBulletLine(lineText, vl.BBox.X0, page.MediaBox.X0, charWidth)
-			out.WriteString(formatted + "\n")
-			prevBBox = vl.BBox
-			prevBlockNo = vl.BlockNo
-			prevWasJoinable = false
-			continue
+		if strings.HasPrefix(firstSpan.Text, "[") {
+			needBreak = true
 		}
-
-		// Regular line - emit with per-span formatting
-		writeFormattedSpans(&out, vl.Spans)
+		if IsBullet(firstNonSpaceRune(lineText)) {
+			needBreak = true
+		}
+		if firstSpan.Superscript {
+			needBreak = true
+		}
+		if needBreak {
+			out.WriteString("\n")
+		}
 		prevBBox = vl.BBox
+
+		// === Bullet handling ===
+		firstRune := firstNonSpaceRune(lineText)
+		if IsBullet(firstRune) {
+			charWidth := vl.BBox.Width() / float64(max(len(lineText), 1))
+			formatted := FormatBulletLine(lineText, vl.BBox.X0, clip.X0, charWidth)
+			out.WriteString(formatted + "\n")
+			prevBlockNo = vl.BlockNo
+			continue
+		}
+
+		// === Regular text: format each span ===
+		for _, sp := range vl.Spans {
+			formatted := FormatSpan(sp)
+			if formatted != "" {
+				out.WriteString(formatted + " ")
+			}
+		}
+		out.WriteString("\n")
 		prevBlockNo = vl.BlockNo
-		prevWasJoinable = !isBullet && headerPrefix == "" && !allMono
 	}
 
-	if prevWasJoinable {
-		out.WriteString("\n")
-	}
 	if inCode {
 		out.WriteString("```\n")
 	}
 
 	result := out.String()
 	result = strings.ReplaceAll(result, " \n", "\n")
+	result = strings.ReplaceAll(result, "  ", " ")
 	result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
 	return strings.TrimSpace(result)
-}
-
-func writeFormattedSpans(out *strings.Builder, spans []Span) {
-	for i, sp := range spans {
-		formatted := FormatSpan(sp)
-		if formatted != "" {
-			if i > 0 {
-				out.WriteString(" ")
-			}
-			out.WriteString(formatted)
-		}
-	}
 }
 
 func lineRawText(vl VisualLine) string {

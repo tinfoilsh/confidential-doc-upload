@@ -139,22 +139,29 @@ func blocksOverlapX(a, b mupdf.Rect) bool {
 }
 
 // buildSpans groups consecutive characters with the same style into Spans.
+// Also detects superscripts heuristically (smaller size + higher baseline).
 func buildSpans(chars []mupdf.TextChar) []Span {
 	if len(chars) == 0 {
 		return nil
 	}
+
+	// Compute median font size for superscript detection
+	medianSize := medianFontSize(chars)
 
 	var spans []Span
 	var cur Span
 	cur.Bold = chars[0].Bold
 	cur.Italic = chars[0].Italic
 	cur.Mono = chars[0].Mono
+	cur.Superscript = isSuperscript(chars[0], medianSize)
 	cur.Size = chars[0].Size
 	cur.X0 = chars[0].Origin[0]
 
 	var buf strings.Builder
 	for _, ch := range chars {
-		sameStyle := ch.Bold == cur.Bold && ch.Italic == cur.Italic && ch.Mono == cur.Mono
+		isSuper := isSuperscript(ch, medianSize)
+		sameStyle := ch.Bold == cur.Bold && ch.Italic == cur.Italic &&
+			ch.Mono == cur.Mono && isSuper == cur.Superscript
 		if !sameStyle {
 			cur.Text = buf.String()
 			if cur.Text != "" {
@@ -162,11 +169,12 @@ func buildSpans(chars []mupdf.TextChar) []Span {
 			}
 			buf.Reset()
 			cur = Span{
-				Bold:   ch.Bold,
-				Italic: ch.Italic,
-				Mono:   ch.Mono,
-				Size:   ch.Size,
-				X0:     ch.Origin[0],
+				Bold:        ch.Bold,
+				Italic:      ch.Italic,
+				Mono:        ch.Mono,
+				Superscript: isSuper,
+				Size:        ch.Size,
+				X0:          ch.Origin[0],
 			}
 		}
 		buf.WriteRune(ch.Rune)
@@ -176,6 +184,22 @@ func buildSpans(chars []mupdf.TextChar) []Span {
 		spans = append(spans, cur)
 	}
 	return spans
+}
+
+func isSuperscript(ch mupdf.TextChar, medianSize float64) bool {
+	return medianSize > 0 && ch.Size < medianSize*0.75
+}
+
+func medianFontSize(chars []mupdf.TextChar) float64 {
+	if len(chars) == 0 {
+		return 0
+	}
+	sizes := make([]float64, len(chars))
+	for i, ch := range chars {
+		sizes[i] = ch.Size
+	}
+	sort.Float64s(sizes)
+	return sizes[len(sizes)/2]
 }
 
 func unionRect(a, b mupdf.Rect) mupdf.Rect {

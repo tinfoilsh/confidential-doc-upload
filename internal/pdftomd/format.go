@@ -11,7 +11,6 @@ var bulletChars = map[rune]bool{
 	'\uf0a7': true, '\uf0b7': true, '\ufffd': true,
 }
 
-// IsBullet returns true if the rune is a bullet-like character.
 func IsBullet(r rune) bool {
 	if r >= 0x25A0 && r <= 0x25FF {
 		return true
@@ -21,41 +20,55 @@ func IsBullet(r rune) bool {
 
 // Span represents a run of text with uniform style.
 type Span struct {
-	Text   string
-	Bold   bool
-	Italic bool
-	Mono   bool
-	Size   float64
-	X0     float64
+	Text        string
+	Bold        bool
+	Italic      bool
+	Mono        bool
+	Superscript bool
+	Size        float64
+	X0          float64
 }
 
 // FormatSpan wraps span text with markdown style markers.
+// Nesting order matches pymupdf4llm: strikeout > italic > bold > mono (outside to inside).
 func FormatSpan(s Span) string {
 	text := strings.TrimRight(s.Text, " ")
 	if text == "" {
 		return ""
 	}
 
+	// Handle superscripts: wrap in brackets like pymupdf4llm
+	if s.Superscript {
+		text = "[" + text + "]"
+	}
+
+	prefix := ""
+	suffix := ""
+
 	if s.Mono {
-		text = "`" + text + "`"
+		prefix = "`" + prefix
+		suffix += "`"
 	}
 	if s.Bold {
-		text = "**" + text + "**"
+		prefix = "**" + prefix
+		suffix += "**"
 	}
 	if s.Italic {
-		text = "_" + text + "_"
+		prefix = "_" + prefix
+		suffix += "_"
 	}
-	return text
+
+	return prefix + text + suffix
 }
 
-// FormatBulletLine converts a bullet-prefixed line to markdown list syntax
-// with appropriate indentation based on x-offset.
+// FormatBulletLine converts a bullet-prefixed line to markdown list syntax.
 func FormatBulletLine(text string, xOffset float64, clipX0 float64, charWidth float64) string {
 	if len(text) < 2 {
 		return text
 	}
 	rest := strings.TrimLeft(text[1:], " ")
 	mdText := "- " + rest
+	mdText = strings.ReplaceAll(mdText, "  ", " ")
 
 	if charWidth <= 0 {
 		charWidth = 6
