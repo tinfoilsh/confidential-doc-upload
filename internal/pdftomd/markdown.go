@@ -94,6 +94,16 @@ func pageToMarkdown(page *mupdf.Page, headers HeaderMap, segments []mupdf.LineSe
 // - Bullets and bracket-starts add \n
 // - Superscript starts add \n
 func columnToMarkdown(page *mupdf.Page, headers HeaderMap, clip mupdf.Rect, tables []TableResult) string {
+	// Collect table bboxes in this column for text dedup
+	var tableBBoxes []mupdf.Rect
+	for _, t := range tables {
+		centerX := (t.BBox.X0 + t.BBox.X1) / 2
+		centerY := (t.BBox.Y0 + t.BBox.Y1) / 2
+		if centerX >= clip.X0 && centerX <= clip.X1 && centerY >= clip.Y0 && centerY <= clip.Y1 {
+			tableBBoxes = append(tableBBoxes, t.BBox)
+		}
+	}
+
 	lines := ReconstructLinesInClip(page, 3, clip)
 	if len(lines) == 0 && len(tables) == 0 {
 		return ""
@@ -108,6 +118,20 @@ func columnToMarkdown(page *mupdf.Page, headers HeaderMap, clip mupdf.Rect, tabl
 	for _, vl := range lines {
 		lineText := lineRawText(vl)
 		if strings.TrimSpace(lineText) == "" {
+			continue
+		}
+
+		// Skip lines inside table regions to avoid duplicating table content
+		lineCY := (vl.BBox.Y0 + vl.BBox.Y1) / 2
+		lineCX := (vl.BBox.X0 + vl.BBox.X1) / 2
+		inTable := false
+		for _, tb := range tableBBoxes {
+			if lineCX >= tb.X0-2 && lineCX <= tb.X1+2 && lineCY >= tb.Y0-2 && lineCY <= tb.Y1+2 {
+				inTable = true
+				break
+			}
+		}
+		if inTable {
 			continue
 		}
 
@@ -232,13 +256,12 @@ func columnToMarkdown(page *mupdf.Page, headers HeaderMap, clip mupdf.Rect, tabl
 		centerX := (t.BBox.X0 + t.BBox.X1) / 2
 		centerY := (t.BBox.Y0 + t.BBox.Y1) / 2
 		if centerX >= clip.X0 && centerX <= clip.X1 && centerY >= clip.Y0 && centerY <= clip.Y1 {
-			out.WriteString("\n" + t.Markdown + "\n")
+			out.WriteString("\n\n" + t.Markdown)
 		}
 	}
 
 	result := out.String()
 	result = strings.ReplaceAll(result, " \n", "\n")
-	result = strings.ReplaceAll(result, "  ", " ")
 	result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
 	return strings.TrimSpace(result)
 }

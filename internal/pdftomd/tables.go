@@ -402,7 +402,6 @@ func renderTableMarkdown(cells []cell, page *mupdf.Page) string {
 			continue
 		}
 		for _, line := range block.Lines {
-			prevCol, prevRow := -1, -1
 			for _, ch := range line.Chars {
 				cx, cy := ch.Origin[0], ch.Origin[1]
 				col := -1
@@ -420,17 +419,6 @@ func renderTableMarkdown(cells []cell, page *mupdf.Page) string {
 					}
 				}
 				if row >= 0 && col >= 0 {
-					// Add space when entering a new word (gap between chars)
-					if row == prevRow && col == prevCol && ch.Rune > ' ' {
-						cellText := grid[row][col]
-						if len(cellText) > 0 {
-							lastRune := rune(cellText[len(cellText)-1])
-							if lastRune != ' ' && lastRune != '-' {
-								// Check for x-gap indicating word boundary
-								// Simple heuristic: if we skipped a space char, add one
-							}
-						}
-					}
 					if ch.Rune == ' ' {
 						if len(grid[row][col]) > 0 && grid[row][col][len(grid[row][col])-1] != ' ' {
 							grid[row][col] += " "
@@ -438,8 +426,6 @@ func renderTableMarkdown(cells []cell, page *mupdf.Page) string {
 					} else {
 						grid[row][col] += string(ch.Rune)
 					}
-					prevCol = col
-					prevRow = row
 				}
 			}
 		}

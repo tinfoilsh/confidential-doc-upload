@@ -52,13 +52,13 @@ Upload files as `multipart/form-data` with field name `files`.
 #### Modes
 
 
-| Mode                 | Description                                                              | Speed (18p PDF) |
-| -------------------- | ------------------------------------------------------------------------ | --------------- |
-| `**text`** (default) | Markdown from text layer. VLM OCR only for scanned pages.                | **~1s**         |
-| `**vision`**         | Text + VLM visual descriptions for figures/charts on born-digital pages. | ~13s            |
-| `**images`**         | Text + page images as base64 PNG. No VLM.                                | ~1s             |
-| `**raw**`            | Text layer only. No VLM, no rendering.                                   | **~1s**         |
-| `**vlm`**            | VLM full-page OCR on every page.                                         | ~30s+           |
+| Mode | Description | Speed (18p PDF) |
+|------|-------------|-----------------|
+| `text` (default) | Markdown from text layer. VLM OCR only for scanned pages. | ~1s |
+| `vision` | Text + VLM visual descriptions for figures/charts on born-digital pages. | ~13s |
+| `images` | Text + page images as base64 PNG. No VLM. | ~1s |
+| `raw` | Text layer only. No VLM, no rendering. | ~1s |
+| `vlm` | VLM full-page OCR on every page. | ~30s+ |
 
 
 #### Response

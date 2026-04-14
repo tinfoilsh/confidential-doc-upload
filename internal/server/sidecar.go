@@ -49,7 +49,6 @@ func isPDF(filename string) bool {
 
 const pdfParserBin = "pdfparser"
 const parserTimeoutSeconds = 120
-const parserMemoryLimitBytes = 512 * 1024 * 1024 // 512 MB
 
 // parsePDF runs the pdfparser binary in a sandboxed child process.
 //
@@ -65,10 +64,15 @@ func parsePDF(ctx context.Context, data []byte, args ...string) ([]byte, error) 
 
 	cmd := exec.CommandContext(ctx, pdfParserBin, args...)
 	cmd.Stdin = bytes.NewReader(data)
-	cmd.Env = []string{}  // empty env: no secrets
+	cmd.Env = []string{} // empty env: no secrets
 	cmd.Dir = os.TempDir()
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWNET, // no network access
+
+	// CLONE_NEWNET requires CAP_SYS_ADMIN (or --privileged).
+	// Default: sandbox enabled. Set DISABLE_PARSER_SANDBOX=1 for local dev only.
+	if os.Getenv("DISABLE_PARSER_SANDBOX") != "1" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Cloneflags: syscall.CLONE_NEWNET,
+		}
 	}
 
 	var stdout, stderr bytes.Buffer
