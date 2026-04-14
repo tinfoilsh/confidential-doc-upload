@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"crypto/rand"
@@ -42,7 +42,7 @@ func init() {
 	prometheus.MustRegister(metricReqs, metricDuration, metricActive, metricErrors)
 }
 
-func main() {
+func Main() {
 	initTinfoilClient()
 
 	mux := http.NewServeMux()

@@ -1,4 +1,4 @@
-module github.com/tinfoilsh/confidential-doc-upload/router
+module github.com/tinfoilsh/confidential-doc-upload
 
 go 1.25.9
 
