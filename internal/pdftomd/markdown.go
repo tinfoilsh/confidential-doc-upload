@@ -31,7 +31,8 @@ func ConvertDocument(doc *mupdf.Document) ([]PageResult, error) {
 
 	results := make([]PageResult, nPages)
 	for i, page := range pages {
-		md := pageToMarkdown(page, headers)
+		segments, _ := doc.ExtractLineSegments(i)
+		md := pageToMarkdown(page, headers, segments)
 		results[i] = PageResult{
 			Markdown:  md,
 			IsScanned: page.CharCount < scannedThreshold,
@@ -41,13 +42,16 @@ func ConvertDocument(doc *mupdf.Document) ([]PageResult, error) {
 	return results, nil
 }
 
-func pageToMarkdown(page *mupdf.Page, headers HeaderMap) string {
+func pageToMarkdown(page *mupdf.Page, headers HeaderMap, segments []mupdf.LineSegment) string {
+	// Detect tables from vector line segments
+	tables := DetectTables(page, segments)
+
 	columns := columnBoxes(page, 0, 0)
 
 	if len(columns) > 0 {
 		var parts []string
 		for _, col := range columns {
-			md := columnToMarkdown(page, headers, col)
+			md := columnToMarkdown(page, headers, col, tables)
 			if md != "" {
 				parts = append(parts, md)
 			}
@@ -56,7 +60,7 @@ func pageToMarkdown(page *mupdf.Page, headers HeaderMap) string {
 		return strings.TrimSpace(result)
 	}
 
-	return columnToMarkdown(page, headers, page.MediaBox)
+	return columnToMarkdown(page, headers, page.MediaBox, tables)
 }
 
 // columnToMarkdown converts text within a clip region to markdown.
@@ -66,9 +70,9 @@ func pageToMarkdown(page *mupdf.Page, headers HeaderMap) string {
 // - Y-gap > 1.5x line height adds \n
 // - Bullets and bracket-starts add \n
 // - Superscript starts add \n
-func columnToMarkdown(page *mupdf.Page, headers HeaderMap, clip mupdf.Rect) string {
+func columnToMarkdown(page *mupdf.Page, headers HeaderMap, clip mupdf.Rect, tables []TableResult) string {
 	lines := ReconstructLinesInClip(page, 3, clip)
-	if len(lines) == 0 {
+	if len(lines) == 0 && len(tables) == 0 {
 		return ""
 	}
 
@@ -198,6 +202,15 @@ func columnToMarkdown(page *mupdf.Page, headers HeaderMap, clip mupdf.Rect) stri
 
 	if inCode {
 		out.WriteString("```\n")
+	}
+
+	// Append any detected tables in this column
+	for _, t := range tables {
+		centerX := (t.BBox.X0 + t.BBox.X1) / 2
+		centerY := (t.BBox.Y0 + t.BBox.Y1) / 2
+		if centerX >= clip.X0 && centerX <= clip.X1 && centerY >= clip.Y0 && centerY <= clip.Y1 {
+			out.WriteString("\n" + t.Markdown + "\n")
+		}
 	}
 
 	result := out.String()

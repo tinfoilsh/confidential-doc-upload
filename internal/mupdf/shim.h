@@ -12,4 +12,19 @@ fz_buffer* mupdf_render_page_png(fz_context *ctx, fz_page *page, float zoom, int
 
 static inline fz_stext_line* mupdf_block_first_line(fz_stext_block *b) { return b->u.t.first_line; }
 
+/* Grid (table) accessors */
+static inline fz_stext_grid_positions* mupdf_block_grid_xs(fz_stext_block *b) { return b->u.b.xs; }
+static inline fz_stext_grid_positions* mupdf_block_grid_ys(fz_stext_block *b) { return b->u.b.ys; }
+static inline int mupdf_grid_len(fz_stext_grid_positions *g) { return g ? g->len : 0; }
+static inline float mupdf_grid_pos(fz_stext_grid_positions *g, int i) { return g->list[i].pos; }
+
+/* Drawing/path extraction for table detection */
+typedef struct {
+    float x0, y0, x1, y1;
+    int is_horizontal; /* 1 if horizontal, 0 if vertical, -1 if neither */
+} mupdf_line_segment;
+
+int mupdf_extract_line_segments(fz_context *ctx, fz_page *page,
+    mupdf_line_segment *out, int max_segments, int *errcode);
+
 #endif
