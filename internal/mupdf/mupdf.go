@@ -40,10 +40,17 @@ type TextLine struct {
 	Chars []TextChar
 }
 
+type GridCell struct {
+	Row, Col int
+	Text     string
+}
+
 type TextBlock struct {
-	Type  int // 0=text, 1=image
-	BBox  Rect
-	Lines []TextLine
+	Type    int // 0=text, 1=image, 4=grid(table)
+	BBox    Rect
+	Lines   []TextLine
+	GridXs  []float64 // column boundary positions (for grid blocks)
+	GridYs  []float64 // row boundary positions (for grid blocks)
 }
 
 type Page struct {
@@ -126,6 +133,20 @@ func (d *Document) ExtractPage(pageNum int) (*Page, error) {
 			BBox: rectFromC(block.bbox),
 		}
 
+		// Extract grid positions for table blocks
+		if block._type == 4 { // FZ_STEXT_BLOCK_GRID
+			xs := C.mupdf_block_grid_xs(block)
+			ys := C.mupdf_block_grid_ys(block)
+			nxs := int(C.mupdf_grid_len(xs))
+			nys := int(C.mupdf_grid_len(ys))
+			for i := 0; i < nxs; i++ {
+				tb.GridXs = append(tb.GridXs, float64(C.mupdf_grid_pos(xs, C.int(i))))
+			}
+			for i := 0; i < nys; i++ {
+				tb.GridYs = append(tb.GridYs, float64(C.mupdf_grid_pos(ys, C.int(i))))
+			}
+		}
+
 		if block._type == C.FZ_STEXT_BLOCK_TEXT {
 			for line := C.mupdf_block_first_line(block); line != nil; line = line.next {
 				tl := TextLine{
@@ -175,6 +196,40 @@ func (d *Document) ExtractPage(pageNum int) (*Page, error) {
 	}
 
 	return page, nil
+}
+
+type LineSegment struct {
+	X0, Y0, X1, Y1 float64
+	IsHorizontal    int // 1=horizontal, 0=vertical, -1=diagonal
+}
+
+func (d *Document) ExtractLineSegments(pageNum int) ([]LineSegment, error) {
+	var errcode C.int
+	cpage := C.mupdf_load_page(d.ctx, d.doc, C.int(pageNum), &errcode)
+	if errcode != 0 || cpage == nil {
+		return nil, fmt.Errorf("mupdf: failed to load page %d", pageNum)
+	}
+	defer C.fz_drop_page(d.ctx, cpage)
+
+	const maxSegments = 10000
+	segments := make([]C.mupdf_line_segment, maxSegments)
+	count := C.mupdf_extract_line_segments(d.ctx, cpage, &segments[0], C.int(maxSegments), &errcode)
+	if errcode != 0 {
+		return nil, fmt.Errorf("mupdf: failed to extract line segments from page %d", pageNum)
+	}
+
+	result := make([]LineSegment, int(count))
+	for i := 0; i < int(count); i++ {
+		s := segments[i]
+		result[i] = LineSegment{
+			X0:           float64(s.x0),
+			Y0:           float64(s.y0),
+			X1:           float64(s.x1),
+			Y1:           float64(s.y1),
+			IsHorizontal: int(s.is_horizontal),
+		}
+	}
+	return result, nil
 }
 
 func (d *Document) RenderPagePNG(pageNum int, dpi int) ([]byte, error) {
