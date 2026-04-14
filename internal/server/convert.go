@@ -19,10 +19,11 @@ type ConvertResult struct {
 	Pages     []PageResult `json:"pages,omitempty"`
 }
 
-// mode "text"   (default): full markdown, Gemma OCR for scanned, Gemma visual descriptions for born-digital
-// mode "images": text where available + page images, no VLM — fast, for vision-capable downstream models
-// mode "raw":    text layer only, no VLM, no images — fastest possible
-// mode "vlm":    Gemma full-page OCR on every page — highest quality, slowest
+// mode "text"   (default): text extraction + VLM OCR for scanned pages only. No VLM for born-digital.
+// mode "vision":           text + VLM OCR for scanned + VLM visual descriptions for born-digital.
+// mode "images":           text where available + page images, no VLM — for vision-capable downstream models.
+// mode "raw":              text layer only, no VLM, no images — fastest possible.
+// mode "vlm":              VLM full-page OCR on every page — highest quality, slowest.
 func convertFile(ctx context.Context, data []byte, filename string, mode string) (ConvertResult, error) {
 	t0 := time.Now()
 
@@ -96,8 +97,10 @@ func convertPDF(ctx context.Context, data []byte, filename, mode string, extract
 		return convertPDFImages(ctx, data, filename, nPages, textPages, scannedSet)
 	case "vlm":
 		return convertPDFVLM(ctx, data, filename, nPages, t0)
-	default:
-		return convertPDFText(ctx, data, filename, nPages, scannedIdxs, textPages, scannedSet, t0)
+	case "vision":
+		return convertPDFVision(ctx, data, filename, nPages, scannedIdxs, textPages, scannedSet, t0)
+	default: // "text"
+		return convertPDFText(ctx, data, filename, nPages, scannedIdxs, textPages, t0)
 	}
 }
 
@@ -173,30 +176,73 @@ func convertPDFVLM(ctx context.Context, data []byte, filename string, nPages int
 	}, nil
 }
 
-// mode=text (default): full extraction with VLM OCR + visual descriptions
-func convertPDFText(ctx context.Context, data []byte, filename string, nPages int, scannedIdxs []int, textPages map[int]string, scannedSet map[int]bool, t0 time.Time) (ConvertResult, error) {
-	needsRender := len(scannedIdxs) > 0 || len(textPages) > 0
-	var renderedImages map[int]string
-	if needsRender {
+// mode=text (default): text extraction for born-digital, VLM OCR for scanned only.
+// No VLM calls for born-digital pages — fast for native PDFs.
+func convertPDFText(ctx context.Context, data []byte, filename string, nPages int, scannedIdxs []int, textPages map[int]string, t0 time.Time) (ConvertResult, error) {
+	// Only send scanned pages to VLM
+	if len(scannedIdxs) > 0 {
 		rendered, err := sidecarRender(ctx, data, filename, 100)
 		if err != nil {
 			return ConvertResult{}, fmt.Errorf("render: %w", err)
 		}
-		renderedImages = make(map[int]string)
+		renderedImages := make(map[int]string)
 		for _, rp := range rendered.Pages {
 			renderedImages[rp.Page] = rp.Image
 		}
+
+		vlmWork := make(map[int]vlmWorkItem)
+		for _, idx := range scannedIdxs {
+			if img, ok := renderedImages[idx]; ok {
+				vlmWork[idx] = vlmWorkItem{image: img, fn: vlmFullPageOCR, kind: "ocr"}
+			}
+		}
+
+		if len(vlmWork) > 0 {
+			vlmResults := vlmParallelMixed(ctx, vlmWork)
+			for idx, res := range vlmResults {
+				if res.err != nil {
+					slog.Warn("vlm ocr failed", "page", idx, "err", res.err)
+					textPages[idx] = "[OCR failed]"
+				} else {
+					textPages[idx] = res.text
+				}
+			}
+		}
+	}
+
+	var parts []string
+	for i := 1; i <= nPages; i++ {
+		parts = append(parts, textPages[i])
+	}
+
+	slog.Info("processed", "file", filename, "pages", nPages,
+		"scanned", len(scannedIdxs), "mode", "text",
+		"elapsed", time.Since(t0).Seconds())
+
+	return ConvertResult{
+		MDContent: strings.Join(parts, "\n\n---\n\n"),
+	}, nil
+}
+
+// mode=vision: text + VLM OCR for scanned + VLM visual descriptions for born-digital.
+// Sends every page to VLM — slow but comprehensive.
+func convertPDFVision(ctx context.Context, data []byte, filename string, nPages int, scannedIdxs []int, textPages map[int]string, scannedSet map[int]bool, t0 time.Time) (ConvertResult, error) {
+	rendered, err := sidecarRender(ctx, data, filename, 100)
+	if err != nil {
+		return ConvertResult{}, fmt.Errorf("render: %w", err)
+	}
+	renderedImages := make(map[int]string)
+	for _, rp := range rendered.Pages {
+		renderedImages[rp.Page] = rp.Image
 	}
 
 	allVLMWork := make(map[int]vlmWorkItem)
-
 	for _, idx := range scannedIdxs {
 		if img, ok := renderedImages[idx]; ok {
 			allVLMWork[idx] = vlmWorkItem{image: img, fn: vlmFullPageOCR, kind: "ocr"}
 		}
 	}
-
-	for page, _ := range textPages {
+	for page := range textPages {
 		if img, ok := renderedImages[page]; ok {
 			allVLMWork[page] = vlmWorkItem{image: img, fn: vlmVisualExtract, kind: "visual"}
 		}
@@ -235,7 +281,7 @@ func convertPDFText(ctx context.Context, data []byte, filename string, nPages in
 
 	slog.Info("processed", "file", filename, "pages", nPages,
 		"scanned", len(scannedIdxs), "visual_descs", len(visualDescs),
-		"mode", "text", "elapsed", time.Since(t0).Seconds())
+		"mode", "vision", "elapsed", time.Since(t0).Seconds())
 
 	return ConvertResult{
 		MDContent: strings.Join(parts, "\n\n---\n\n"),
