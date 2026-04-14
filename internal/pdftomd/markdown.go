@@ -1,6 +1,7 @@
 package pdftomd
 
 import (
+	"log/slog"
 	"strings"
 
 	"github.com/tinfoilsh/confidential-doc-upload/internal/mupdf"
@@ -21,6 +22,7 @@ func ConvertDocument(doc *mupdf.Document) ([]PageResult, error) {
 	for i := 0; i < nPages; i++ {
 		p, err := doc.ExtractPage(i)
 		if err != nil {
+			slog.Warn("failed to extract page, skipping", "page", i, "err", err)
 			pages[i] = &mupdf.Page{PageNum: i}
 			continue
 		}
