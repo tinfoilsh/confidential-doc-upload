@@ -4,7 +4,7 @@ memory: 16384
 
 containers:
   - name: "doc-upload"
-    image: "ghcr.io/tinfoilsh/confidential-doc-upload@sha256:bfe57fba120d210bbca112fe53ffb91136f47a0113aa3eefbede864441c5c716" # v0.0.27
+    image: "ghcr.io/tinfoilsh/confidential-doc-upload@sha256:5f54fa537ae3970baf39e8c0fcf9ef6869853a057d422c85d32c6de940f24693" # v0.0.28
     cap_add:
       - SYS_ADMIN
     env:
