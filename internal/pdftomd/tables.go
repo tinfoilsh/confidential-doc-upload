@@ -66,9 +66,13 @@ func DetectTables(page *mupdf.Page, segments []mupdf.LineSegment) []TableResult 
 	// 6. Group cells into tables
 	tables := groupCellsIntoTables(cells)
 
-	// 7. Render each table to markdown
+	// 7. Render each table to markdown, filtering out false positives
 	var results []TableResult
 	for _, tableCells := range tables {
+		// Require at least 2x2 grid (4 cells minimum)
+		if len(tableCells) < 4 {
+			continue
+		}
 		md := renderTableMarkdown(tableCells, page)
 		if md != "" {
 			bbox := tableBBox(tableCells)
@@ -398,10 +402,8 @@ func renderTableMarkdown(cells []cell, page *mupdf.Page) string {
 			continue
 		}
 		for _, line := range block.Lines {
+			prevCol, prevRow := -1, -1
 			for _, ch := range line.Chars {
-				if ch.Rune <= ' ' {
-					continue
-				}
 				cx, cy := ch.Origin[0], ch.Origin[1]
 				col := -1
 				for c := 0; c < nCols; c++ {
@@ -418,7 +420,26 @@ func renderTableMarkdown(cells []cell, page *mupdf.Page) string {
 					}
 				}
 				if row >= 0 && col >= 0 {
-					grid[row][col] += string(ch.Rune)
+					// Add space when entering a new word (gap between chars)
+					if row == prevRow && col == prevCol && ch.Rune > ' ' {
+						cellText := grid[row][col]
+						if len(cellText) > 0 {
+							lastRune := rune(cellText[len(cellText)-1])
+							if lastRune != ' ' && lastRune != '-' {
+								// Check for x-gap indicating word boundary
+								// Simple heuristic: if we skipped a space char, add one
+							}
+						}
+					}
+					if ch.Rune == ' ' {
+						if len(grid[row][col]) > 0 && grid[row][col][len(grid[row][col])-1] != ' ' {
+							grid[row][col] += " "
+						}
+					} else {
+						grid[row][col] += string(ch.Rune)
+					}
+					prevCol = col
+					prevRow = row
 				}
 			}
 		}
@@ -431,17 +452,17 @@ func renderTableMarkdown(cells []cell, page *mupdf.Page) string {
 		}
 	}
 
-	// Check we have actual content
-	hasContent := false
+	// Require at least 30% of cells to have content (filter diagram false positives)
+	totalCells := nRows * nCols
+	filledCells := 0
 	for _, row := range grid {
-		for _, cell := range row {
-			if cell != "" {
-				hasContent = true
-				break
+		for _, c := range row {
+			if c != "" {
+				filledCells++
 			}
 		}
 	}
-	if !hasContent {
+	if filledCells == 0 || float64(filledCells)/float64(totalCells) < 0.3 {
 		return ""
 	}
 
