@@ -88,8 +88,8 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	if mode == "" {
 		mode = "text"
 	}
-	if mode != "text" && mode != "images" && mode != "raw" && mode != "vlm" {
-		httpErr(w, 400, "invalid mode: must be 'text', 'images', 'raw', or 'vlm'")
+	if mode != "text" && mode != "vision" && mode != "images" && mode != "raw" && mode != "vlm" {
+		httpErr(w, 400, "invalid mode: must be 'text', 'vision', 'images', 'raw', or 'vlm'")
 		return
 	}
 
