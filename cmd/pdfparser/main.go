@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 
 	"github.com/tinfoilsh/confidential-doc-upload/internal/mupdf"
 	"github.com/tinfoilsh/confidential-doc-upload/internal/pdftomd"
@@ -29,6 +30,11 @@ func main() {
 	render := flag.Bool("render", false, "include page images as base64 PNG")
 	dpi := flag.Int("dpi", 100, "DPI for page rendering")
 	flag.Parse()
+
+	// Use Go's soft memory limit (GOMEMLIMIT) for defense in depth.
+	// This is Go-aware and doesn't break the runtime like RLIMIT_AS does.
+	// The router also sets a hard 120s timeout.
+	debug.SetMemoryLimit(512 * 1024 * 1024)
 
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
@@ -78,3 +84,4 @@ func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "pdfparser: "+format+"\n", args...)
 	os.Exit(1)
 }
+

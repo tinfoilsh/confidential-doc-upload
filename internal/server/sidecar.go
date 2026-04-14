@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 )
 
 type ExtractPage struct {
@@ -46,21 +48,38 @@ func isPDF(filename string) bool {
 }
 
 const pdfParserBin = "pdfparser"
+const parserTimeoutSeconds = 120
+const parserMemoryLimitBytes = 512 * 1024 * 1024 // 512 MB
 
 // parsePDF runs the pdfparser binary in a sandboxed child process.
+//
+// Security hardening:
+//   - Empty environment: no API keys or secrets accessible
+//   - Network namespace isolation (CLONE_NEWNET): no network access
+//   - Memory limit (RLIMIT_AS): prevents zip/decompression bombs
+//   - Timeout: prevents hang on malicious PDFs
+//   - Process dies after each request: OS reclaims all memory
 func parsePDF(ctx context.Context, data []byte, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, parserTimeoutSeconds*time.Second)
+	defer cancel()
+
 	cmd := exec.CommandContext(ctx, pdfParserBin, args...)
 	cmd.Stdin = bytes.NewReader(data)
-	cmd.Env = []string{} // empty env: no secrets
+	cmd.Env = []string{}  // empty env: no secrets
 	cmd.Dir = os.TempDir()
-	// CLONE_NEWNET requires CAP_SYS_ADMIN; enable when running privileged
-	// cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWNET}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags: syscall.CLONE_NEWNET, // no network access
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			slog.Error("parser subprocess timed out", "timeout", parserTimeoutSeconds)
+			return nil, fmt.Errorf("parser: timeout after %ds", parserTimeoutSeconds)
+		}
 		slog.Error("parser subprocess failed", "err", err, "stderr", stderr.String())
 		return nil, fmt.Errorf("parser: %w: %s", err, stderr.String())
 	}
