@@ -9,18 +9,20 @@ fz_context* mupdf_new_context(void) {
 
 fz_document* mupdf_open_document(fz_context *ctx, const void *data, size_t len, int *errcode) {
     fz_document *doc = NULL;
-    fz_stream *stm = NULL;
+    fz_buffer *buf = NULL;
     *errcode = 0;
     fz_try(ctx) {
-        stm = fz_open_memory(ctx, data, len);
-        doc = fz_open_document_with_stream(ctx, "application/pdf", stm);
+        buf = fz_new_buffer_from_shared_data(ctx, data, len);
+        doc = fz_open_document_with_buffer(ctx, "application/pdf", buf);
     }
     fz_catch(ctx) {
         *errcode = 1;
-        if (stm) fz_drop_stream(ctx, stm);
+        if (buf) fz_drop_buffer(ctx, buf);
         return NULL;
     }
-    fz_drop_stream(ctx, stm);
+    /* Buffer ownership stays with Go (shared data, not copied).
+       The document holds a reference to the buffer internally.
+       Go must keep the []byte alive for the document's lifetime. */
     return doc;
 }
 
