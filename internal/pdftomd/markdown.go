@@ -42,7 +42,27 @@ func ConvertDocument(doc *mupdf.Document) ([]PageResult, error) {
 }
 
 func pageToMarkdown(page *mupdf.Page, headers HeaderMap) string {
-	lines := ReconstructLines(page, 3)
+	columns := columnBoxes(page, 0, 0)
+
+	// If column detection found regions, extract per column
+	if len(columns) > 0 {
+		var parts []string
+		for _, col := range columns {
+			md := columnToMarkdown(page, headers, col)
+			if md != "" {
+				parts = append(parts, md)
+			}
+		}
+		result := strings.Join(parts, "\n\n")
+		return strings.TrimSpace(result)
+	}
+
+	// Fallback: process whole page
+	return columnToMarkdown(page, headers, page.MediaBox)
+}
+
+func columnToMarkdown(page *mupdf.Page, headers HeaderMap, clip mupdf.Rect) string {
+	lines := ReconstructLinesInClip(page, 3, clip)
 	if len(lines) == 0 {
 		return ""
 	}

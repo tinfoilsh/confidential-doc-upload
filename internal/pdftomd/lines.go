@@ -16,9 +16,13 @@ type VisualLine struct {
 	BlockNo int
 }
 
-// ReconstructLines groups MuPDF lines into visual lines based on y-proximity,
-// then builds spans with style info from the character data.
+// ReconstructLines groups MuPDF lines into visual lines for the whole page.
 func ReconstructLines(page *mupdf.Page, tolerance float64) []VisualLine {
+	return ReconstructLinesInClip(page, tolerance, page.MediaBox)
+}
+
+// ReconstructLinesInClip groups MuPDF lines into visual lines within a clip rectangle.
+func ReconstructLinesInClip(page *mupdf.Page, tolerance float64, clip mupdf.Rect) []VisualLine {
 	if tolerance == 0 {
 		tolerance = 3
 	}
@@ -39,6 +43,13 @@ func ReconstructLines(page *mupdf.Page, tolerance float64) []VisualLine {
 				continue
 			}
 			if len(line.Chars) == 0 {
+				continue
+			}
+			// Filter: line center must be inside the clip
+			lineCenterX := (line.BBox.X0 + line.BBox.X1) / 2
+			lineCenterY := (line.BBox.Y0 + line.BBox.Y1) / 2
+			if lineCenterX < clip.X0 || lineCenterX > clip.X1 ||
+				lineCenterY < clip.Y0 || lineCenterY > clip.Y1 {
 				continue
 			}
 			allSpans = append(allSpans, rawSpan{
@@ -151,10 +162,5 @@ func unionRect(a, b mupdf.Rect) mupdf.Rect {
 	if a.X0 == 0 && a.Y0 == 0 && a.X1 == 0 && a.Y1 == 0 {
 		return b
 	}
-	return mupdf.Rect{
-		X0: min(a.X0, b.X0),
-		Y0: min(a.Y0, b.Y0),
-		X1: max(a.X1, b.X1),
-		Y1: max(a.Y1, b.Y1),
-	}
+	return rectUnion(a, b)
 }
