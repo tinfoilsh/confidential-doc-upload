@@ -31,8 +31,7 @@ func ConvertDocument(doc *mupdf.Document) ([]PageResult, error) {
 
 	results := make([]PageResult, nPages)
 	for i, page := range pages {
-		segments, _ := doc.ExtractLineSegments(i)
-		md := pageToMarkdown(page, headers, segments)
+		md := pageToMarkdown(page, headers, page.LineSegments)
 		results[i] = PageResult{
 			Markdown:  md,
 			IsScanned: page.CharCount < scannedThreshold,
@@ -43,8 +42,30 @@ func ConvertDocument(doc *mupdf.Document) ([]PageResult, error) {
 }
 
 func pageToMarkdown(page *mupdf.Page, headers HeaderMap, segments []mupdf.LineSegment) string {
-	// Detect tables from vector line segments
+	// Detect tables from vector line segments (bordered tables)
 	tables := DetectTables(page, segments)
+
+	// Also detect text-aligned tables with horizontal rules only
+	textTables := DetectTextTables(page, segments)
+
+	// Merge, deduplicating by bbox overlap
+	for _, tt := range textTables {
+		overlaps := false
+		for _, t := range tables {
+			ix := rectIntersect(t.BBox, tt.BBox)
+			if !rectIsEmpty(ix) {
+				area := ix.Width() * ix.Height()
+				ttArea := tt.BBox.Width() * tt.BBox.Height()
+				if ttArea > 0 && area/ttArea > 0.3 {
+					overlaps = true
+					break
+				}
+			}
+		}
+		if !overlaps {
+			tables = append(tables, tt)
+		}
+	}
 
 	columns := columnBoxes(page, 0, 0)
 
