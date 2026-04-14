@@ -1,23 +1,17 @@
-"""Document processing sidecar: text extraction + page rendering.
+"""Document processing sidecar for non-PDF formats.
 
-Supports: PDF (PyMuPDF), DOCX (python-docx), PPTX (python-pptx),
-HTML (beautifulsoup4), XLSX (openpyxl), CSV, Markdown, images.
+PDF extraction is handled by the Go pdfparser binary.
+This sidecar handles: DOCX, PPTX, HTML, XLSX, CSV, Markdown, images, text.
 """
 
-import base64
 import csv
 import io
 import time
 from pathlib import Path
 
-import fitz  # PyMuPDF
-from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, UploadFile
 
 app = FastAPI()
-
-SCANNED_THRESHOLD = 50
-MAX_PAGES = 200
 
 
 @app.get("/health")
@@ -33,9 +27,7 @@ async def extract(file: UploadFile = File(...)):
     data = await file.read()
     ext = _detect_ext(file.filename)
 
-    if ext == ".pdf":
-        result = _extract_pdf(data)
-    elif ext in (".docx",):
+    if ext in (".docx",):
         result = _extract_docx(data)
     elif ext in (".pptx",):
         result = _extract_pptx(data)
@@ -56,61 +48,6 @@ async def extract(file: UploadFile = File(...)):
 
     result["elapsed_s"] = time.time() - t0
     return result
-
-
-# ── Render ────────────────────────────────────────────────────────────────
-
-@app.post("/render")
-async def render(file: UploadFile = File(...), dpi: int = Form(100)):
-    t0 = time.time()
-    data = await file.read()
-    ext = _detect_ext(file.filename)
-
-    pages = []
-    if ext == ".pdf":
-        doc = fitz.open(stream=data, filetype="pdf")
-        if doc.page_count > MAX_PAGES:
-            doc.close()
-            return {"pages": [], "page_count": 0, "error": f"Too many pages", "elapsed_s": time.time() - t0}
-        zoom = dpi / 72.0
-        mat = fitz.Matrix(zoom, zoom)
-        for i in range(doc.page_count):
-            pix = doc[i].get_pixmap(matrix=mat)
-            pages.append({
-                "page": i + 1,
-                "image": base64.b64encode(pix.tobytes("png")).decode("ascii"),
-            })
-        doc.close()
-    elif ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff"):
-        pages.append({
-            "page": 1,
-            "image": base64.b64encode(data).decode("ascii"),
-        })
-
-    return {
-        "pages": pages,
-        "page_count": len(pages),
-        "elapsed_s": time.time() - t0,
-    }
-
-
-# ── PDF ───────────────────────────────────────────────────────────────────
-
-def _extract_pdf(data: bytes) -> dict:
-    doc = fitz.open(stream=data, filetype="pdf")
-    if doc.page_count > MAX_PAGES:
-        doc.close()
-        return {"format": "pdf", "pages": [], "error": f"Too many pages ({doc.page_count} > {MAX_PAGES})"}
-    pages = []
-    for i in range(doc.page_count):
-        text = doc[i].get_text()
-        pages.append({
-            "page": i + 1,
-            "text": text,
-            "is_scanned": len(text.strip()) < SCANNED_THRESHOLD,
-        })
-    doc.close()
-    return {"format": "pdf", "pages": pages}
 
 
 # ── DOCX ──────────────────────────────────────────────────────────────────
