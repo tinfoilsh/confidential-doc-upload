@@ -117,7 +117,23 @@ func ReconstructLinesInClip(page *mupdf.Page, tolerance float64, clip mupdf.Rect
 
 		vl := VisualLine{BlockNo: deduped[0].blockNo}
 		var allChars []mupdf.TextChar
-		for _, sp := range deduped {
+		for i, sp := range deduped {
+			// Insert a space between MuPDF lines merged into one visual line,
+			// unless the previous line ends with whitespace or a hyphen.
+			if i > 0 && len(allChars) > 0 && len(sp.chars) > 0 {
+				lastChar := allChars[len(allChars)-1]
+				if lastChar.Rune != ' ' && lastChar.Rune != '\t' &&
+					lastChar.Rune != '-' && lastChar.Rune != '\u2010' {
+					allChars = append(allChars, mupdf.TextChar{
+						Rune:   ' ',
+						Origin: lastChar.Origin,
+						Size:   lastChar.Size,
+						Bold:   lastChar.Bold,
+						Italic: lastChar.Italic,
+						Mono:   lastChar.Mono,
+					})
+				}
+			}
 			allChars = append(allChars, sp.chars...)
 			vl.BBox = unionRect(vl.BBox, sp.bbox)
 		}
