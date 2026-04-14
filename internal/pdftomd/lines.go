@@ -22,15 +22,18 @@ func ReconstructLines(page *mupdf.Page, tolerance float64) []VisualLine {
 }
 
 // ReconstructLinesInClip groups MuPDF lines into visual lines within a clip rectangle.
+// Lines are only merged if they come from blocks with overlapping x-ranges
+// (same column), preventing cross-column merging.
 func ReconstructLinesInClip(page *mupdf.Page, tolerance float64, clip mupdf.Rect) []VisualLine {
 	if tolerance == 0 {
 		tolerance = 3
 	}
 
 	type rawSpan struct {
-		chars   []mupdf.TextChar
-		bbox    mupdf.Rect
-		blockNo int
+		chars    []mupdf.TextChar
+		bbox     mupdf.Rect
+		blockNo  int
+		blockBox mupdf.Rect
 	}
 
 	var allSpans []rawSpan
@@ -39,13 +42,9 @@ func ReconstructLinesInClip(page *mupdf.Page, tolerance float64, clip mupdf.Rect
 			continue
 		}
 		for _, line := range block.Lines {
-			if line.WMode != 0 {
+			if line.WMode != 0 || len(line.Chars) == 0 {
 				continue
 			}
-			if len(line.Chars) == 0 {
-				continue
-			}
-			// Filter: line center must be inside the clip
 			lineCenterX := (line.BBox.X0 + line.BBox.X1) / 2
 			lineCenterY := (line.BBox.Y0 + line.BBox.Y1) / 2
 			if lineCenterX < clip.X0 || lineCenterX > clip.X1 ||
@@ -53,29 +52,41 @@ func ReconstructLinesInClip(page *mupdf.Page, tolerance float64, clip mupdf.Rect
 				continue
 			}
 			allSpans = append(allSpans, rawSpan{
-				chars:   line.Chars,
-				bbox:    line.BBox,
-				blockNo: bi,
+				chars:    line.Chars,
+				bbox:     line.BBox,
+				blockNo:  bi,
+				blockBox: block.BBox,
 			})
 		}
 	}
 
-	sort.Slice(allSpans, func(i, j int) bool {
-		return allSpans[i].bbox.Y1 < allSpans[j].bbox.Y1
+	// Sort by block reading order (preserve MuPDF's block sequence),
+	// then by Y within each block
+	sort.SliceStable(allSpans, func(i, j int) bool {
+		bi, bj := allSpans[i].blockNo, allSpans[j].blockNo
+		if bi != bj {
+			return bi < bj
+		}
+		return allSpans[i].bbox.Y0 < allSpans[j].bbox.Y0
 	})
 
-	// Group into visual lines by y-proximity
+	// Group into visual lines, but only merge spans from blocks that
+	// horizontally overlap (same column)
 	var groups [][]rawSpan
 	for _, sp := range allSpans {
-		if len(groups) == 0 {
-			groups = append(groups, []rawSpan{sp})
-			continue
+		merged := false
+		if len(groups) > 0 {
+			last := groups[len(groups)-1]
+			lastSpan := last[len(last)-1]
+			sameY := math.Abs(sp.bbox.Y1-lastSpan.bbox.Y1) <= tolerance
+			// Check horizontal overlap between blocks
+			sameColumn := blocksOverlapX(sp.blockBox, lastSpan.blockBox)
+			if sameY && sameColumn {
+				groups[len(groups)-1] = append(groups[len(groups)-1], sp)
+				merged = true
+			}
 		}
-		last := groups[len(groups)-1]
-		lastBottom := last[len(last)-1].bbox.Y1
-		if sp.bbox.Y1-lastBottom <= tolerance {
-			groups[len(groups)-1] = append(groups[len(groups)-1], sp)
-		} else {
+		if !merged {
 			groups = append(groups, []rawSpan{sp})
 		}
 	}
@@ -86,7 +97,7 @@ func ReconstructLinesInClip(page *mupdf.Page, tolerance float64, clip mupdf.Rect
 			return group[i].bbox.X0 < group[j].bbox.X0
 		})
 
-		// Deduplicate overlapping spans (same position = same text rendered twice)
+		// Deduplicate overlapping spans
 		var deduped []rawSpan
 		for _, sp := range group {
 			isDupe := false
@@ -110,12 +121,21 @@ func ReconstructLinesInClip(page *mupdf.Page, tolerance float64, clip mupdf.Rect
 			allChars = append(allChars, sp.chars...)
 			vl.BBox = unionRect(vl.BBox, sp.bbox)
 		}
-
 		vl.Spans = buildSpans(allChars)
 		result = append(result, vl)
 	}
 
 	return result
+}
+
+// blocksOverlapX checks if two block bboxes have significant horizontal overlap.
+func blocksOverlapX(a, b mupdf.Rect) bool {
+	overlap := math.Min(a.X1, b.X1) - math.Max(a.X0, b.X0)
+	minWidth := math.Min(a.X1-a.X0, b.X1-b.X0)
+	if minWidth <= 0 {
+		return true
+	}
+	return overlap/minWidth > 0.3
 }
 
 // buildSpans groups consecutive characters with the same style into Spans.
