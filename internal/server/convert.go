@@ -4,9 +4,19 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/bits"
 	"strings"
 	"time"
 )
+
+// nextPow2 rounds n up to the nearest power of 2.
+// Used for size metrics to prevent document fingerprinting via exact byte counts.
+func nextPow2(n int) int {
+	if n <= 1 {
+		return 1
+	}
+	return 1 << bits.Len(uint(n-1))
+}
 
 type PageResult struct {
 	Page      int    `json:"page"`
@@ -90,9 +100,10 @@ func convertPDF(ctx context.Context, data []byte, filename, mode string, extract
 	slog.Info("classified", "file", filename, "pages", nPages,
 		"scanned", len(scannedIdxs), "born_digital", len(textPages), "mode", mode)
 
-	// Record document metrics (coarse-grained for privacy)
+	// Record document metrics (coarse-grained for privacy).
+	// Size is rounded to next power of 2 to prevent document fingerprinting.
 	metricPages.Observe(float64(nPages))
-	metricSize.Observe(float64(len(data)))
+	metricSize.Observe(float64(nextPow2(len(data))))
 	if len(scannedIdxs) == 0 {
 		metricDocType.WithLabelValues("born_digital").Inc()
 	} else if len(textPages) == 0 {
