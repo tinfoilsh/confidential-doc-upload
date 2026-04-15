@@ -90,6 +90,17 @@ func convertPDF(ctx context.Context, data []byte, filename, mode string, extract
 	slog.Info("classified", "file", filename, "pages", nPages,
 		"scanned", len(scannedIdxs), "born_digital", len(textPages), "mode", mode)
 
+	// Record document metrics (coarse-grained for privacy)
+	metricPages.Observe(float64(nPages))
+	metricSize.Observe(float64(len(data)))
+	if len(scannedIdxs) == 0 {
+		metricDocType.WithLabelValues("born_digital").Inc()
+	} else if len(textPages) == 0 {
+		metricDocType.WithLabelValues("scanned").Inc()
+	} else {
+		metricDocType.WithLabelValues("mixed").Inc()
+	}
+
 	switch mode {
 	case "raw":
 		return convertPDFRaw(nPages, textPages)

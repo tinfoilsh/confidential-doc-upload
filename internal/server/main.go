@@ -36,10 +36,27 @@ var (
 	metricDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "router_duration_seconds", Buckets: prometheus.ExponentialBuckets(0.01, 2, 14)}, []string{"format", "mode"})
 	metricActive   = prometheus.NewGauge(prometheus.GaugeOpts{Name: "router_active_requests"})
 	metricErrors   = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "router_errors_total"}, []string{"type"})
+
+	// Coarse-grained buckets to prevent document fingerprinting via exact values
+	metricPages = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "router_document_pages",
+		Help:    "Number of pages per document (bucketed)",
+		Buckets: []float64{1, 2, 5, 10, 20, 50, 100, 200},
+	})
+	metricSize = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "router_document_size_bytes",
+		Help:    "Document size in bytes (bucketed)",
+		Buckets: prometheus.ExponentialBuckets(1024, 4, 8), // 1KB, 4KB, 16KB, 64KB, 256KB, 1MB, 4MB, 16MB
+	})
+	metricDocType = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "router_documents_total",
+		Help: "Documents processed by type",
+	}, []string{"doc_type"}) // "born_digital", "scanned", "mixed"
 )
 
 func init() {
-	prometheus.MustRegister(metricReqs, metricDuration, metricActive, metricErrors)
+	prometheus.MustRegister(metricReqs, metricDuration, metricActive, metricErrors,
+		metricPages, metricSize, metricDocType)
 }
 
 func Main() {
