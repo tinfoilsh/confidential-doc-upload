@@ -52,11 +52,32 @@ var (
 		Name: "router_documents_total",
 		Help: "Documents processed by type",
 	}, []string{"doc_type"}) // "born_digital", "scanned", "mixed"
+
+	// VLM observability. result: success|empty|transport|auth|server|client.
+	metricVLMCalls = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "router_vlm_calls_total",
+		Help: "VLM calls by kind and outcome",
+	}, []string{"kind", "result"})
+	metricVLMDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "router_vlm_duration_seconds",
+		Help:    "VLM call latency by kind",
+		Buckets: prometheus.ExponentialBuckets(0.1, 2, 12),
+	}, []string{"kind"})
+	metricVLMHealthy = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "router_vlm_healthy",
+		Help: "1 if VLM is currently healthy, 0 otherwise",
+	}, func() float64 {
+		if vlmHealth.Load() {
+			return 1
+		}
+		return 0
+	})
 )
 
 func init() {
 	prometheus.MustRegister(metricReqs, metricDuration, metricActive, metricErrors,
-		metricPages, metricSize, metricDocType)
+		metricPages, metricSize, metricDocType,
+		metricVLMCalls, metricVLMDuration, metricVLMHealthy)
 }
 
 func Main() {
@@ -85,12 +106,13 @@ func Main() {
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	sOK := checkHealth(sidecarURL + "/health")
-	vlmOK := tinfoilVLM != nil
-	status := "ok"
+	vlmOK := vlmHealthy()
+	status, code := "ok", http.StatusOK
 	if !sOK || !vlmOK {
-		status = "degraded"
+		status, code = "degraded", http.StatusServiceUnavailable
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]any{
 		"status": status, "router": true, "sidecar": sOK, "vlm": vlmOK,
 	})
