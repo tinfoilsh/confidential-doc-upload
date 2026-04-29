@@ -180,14 +180,31 @@ func convertPDFVLM(ctx context.Context, data []byte, filename string, nPages int
 
 	vlmResults := vlmParallelMixed(ctx, allWork)
 
+	// Every page's OCR is required in vlm mode. If any page fails, fail the
+	// whole request loudly with a non-200 instead of inserting "[OCR failed]"
+	// into the markdown — SDK consumers were ingesting that as valid text.
 	var parts []string
+	var failedPages []int
+	var firstErr error
 	for i := 1; i <= nPages; i++ {
-		if res, ok := vlmResults[i]; ok && res.err == nil {
-			parts = append(parts, res.text)
-		} else {
-			slog.Warn("vlm ocr failed", "page", i)
-			parts = append(parts, "[OCR failed]")
+		res, ok := vlmResults[i]
+		if !ok || res.err != nil {
+			failedPages = append(failedPages, i)
+			if firstErr == nil && ok {
+				firstErr = res.err
+			}
+			parts = append(parts, "")
+			continue
 		}
+		parts = append(parts, res.text)
+	}
+	if len(failedPages) > 0 {
+		slog.Error("vlm ocr failed for required pages",
+			"file", filename, "mode", "vlm",
+			"failed_pages", failedPages, "total_pages", nPages,
+			"first_err", firstErr)
+		return ConvertResult{}, fmt.Errorf("vlm OCR failed for %d/%d pages (first: %v)",
+			len(failedPages), nPages, firstErr)
 	}
 
 	slog.Info("processed", "file", filename, "pages", nPages,
@@ -221,13 +238,27 @@ func convertPDFText(ctx context.Context, data []byte, filename string, nPages in
 
 		if len(vlmWork) > 0 {
 			vlmResults := vlmParallelMixed(ctx, vlmWork)
+			var failedPages []int
+			var firstErr error
 			for idx, res := range vlmResults {
 				if res.err != nil {
-					slog.Warn("vlm ocr failed", "page", idx, "err", res.err)
-					textPages[idx] = "[OCR failed]"
-				} else {
-					textPages[idx] = res.text
+					failedPages = append(failedPages, idx)
+					if firstErr == nil {
+						firstErr = res.err
+					}
+					continue
 				}
+				textPages[idx] = res.text
+			}
+			// Scanned-page OCR is the only path to text for these pages —
+			// failure means we'd ship a silently-broken response. Fail loudly.
+			if len(failedPages) > 0 {
+				slog.Error("vlm ocr failed for scanned pages",
+					"file", filename, "mode", "text",
+					"failed_pages", failedPages, "scanned_pages", len(scannedIdxs),
+					"first_err", firstErr)
+				return ConvertResult{}, fmt.Errorf("vlm OCR failed for %d scanned page(s) (first: %v)",
+					len(failedPages), firstErr)
 			}
 		}
 	}
@@ -273,12 +304,17 @@ func convertPDFVision(ctx context.Context, data []byte, filename string, nPages 
 	vlmResults := vlmParallelMixed(ctx, allVLMWork)
 
 	visualDescs := make(map[int]string)
+	var ocrFailed []int
+	var firstOCRErr error
 	for idx, res := range vlmResults {
 		work := allVLMWork[idx]
 		if res.err != nil {
 			slog.Warn("vlm failed", "page", idx, "kind", work.kind, "err", res.err)
 			if work.kind == "ocr" {
-				textPages[idx] = "[OCR failed]"
+				ocrFailed = append(ocrFailed, idx)
+				if firstOCRErr == nil {
+					firstOCRErr = res.err
+				}
 			}
 			continue
 		}
@@ -290,6 +326,16 @@ func convertPDFVision(ctx context.Context, data []byte, filename string, nPages 
 				visualDescs[idx] = d
 			}
 		}
+	}
+	// OCR for scanned pages is required; visual descriptions for born-digital
+	// pages remain best-effort and don't fail the request.
+	if len(ocrFailed) > 0 {
+		slog.Error("vlm ocr failed for scanned pages",
+			"file", filename, "mode", "vision",
+			"failed_pages", ocrFailed, "scanned_pages", len(scannedIdxs),
+			"first_err", firstOCRErr)
+		return ConvertResult{}, fmt.Errorf("vlm OCR failed for %d scanned page(s) (first: %v)",
+			len(ocrFailed), firstOCRErr)
 	}
 
 	var parts []string

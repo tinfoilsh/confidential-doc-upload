@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -62,6 +63,21 @@ func init() {
 func Main() {
 	initTinfoilClient()
 
+	// Seed lastVLMSuccess with a real inference roundtrip so /health
+	// reflects actual upstream connectivity (not just whether NewClient
+	// returned a non-nil pointer). If this fails we still start serving —
+	// /health will return 503 and the watchdog will keep retrying so the
+	// service self-heals when the upstream enclave comes back.
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := vlmProbe(probeCtx); err != nil {
+		slog.Error("VLM startup probe failed; /health will report degraded", "err", err)
+	} else {
+		slog.Info("VLM startup probe succeeded", "model", vlmModel)
+	}
+	probeCancel()
+
+	go vlmWatchdog(context.Background())
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
 	mux.Handle("GET /metrics", promhttp.Handler())
@@ -83,16 +99,36 @@ func Main() {
 	}
 }
 
+// handleHealth returns 200 only when every dependency is currently usable.
+//
+// Previously this returned 200 with `"status":"degraded"` in the body, so
+// upstream probes (Betterstack, k8s readiness, load balancer health checks)
+// considered the service healthy even when the VLM was completely
+// unreachable — most probes only key off the HTTP status code. The vlmOK
+// check also used to be a nil-pointer check, which couldn't catch SDK
+// connection loss, failed cert rotation, or stale-enclave conditions.
+//
+// vlmHealthy() reads the timestamp of the last successful inference (real
+// traffic OR background probe), so this endpoint reflects current upstream
+// connectivity within vlmHealthyWindow.
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	sOK := checkHealth(sidecarURL + "/health")
-	vlmOK := tinfoilVLM != nil
+	vlmOK := vlmHealthy()
 	status := "ok"
+	code := http.StatusOK
 	if !sOK || !vlmOK {
 		status = "degraded"
+		code = http.StatusServiceUnavailable
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
-		"status": status, "router": true, "sidecar": sOK, "vlm": vlmOK,
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":     status,
+		"router":     true,
+		"sidecar":    sOK,
+		"vlm":        vlmOK,
+		"vlm_model":  vlmModel,
+		"checked_at": time.Now().UTC().Format(time.RFC3339),
 	})
 }
 

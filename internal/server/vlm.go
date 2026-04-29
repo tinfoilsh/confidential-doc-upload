@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -17,7 +19,30 @@ var (
 	vlmKey   = envOr("TINFOIL_API_KEY", "")
 
 	tinfoilVLM *tinfoil.Client
+
+	// lastVLMSuccess is the unix-nano timestamp of the most recent successful
+	// VLM round-trip (real call or background probe). vlmHealthy() reads this
+	// to decide if the SDK is currently usable — a non-nil tinfoilVLM pointer
+	// is not sufficient because the SDK can lose its enclave connection,
+	// fail cert rotation, or be pointed at a stale enclave host.
+	lastVLMSuccess atomic.Int64
+
+	// vlmProbeInterval is how often the background watchdog forces a real
+	// inference roundtrip. Keep short enough that Betterstack catches an
+	// outage within ~1 minute.
+	vlmProbeInterval = time.Duration(envInt("VLM_PROBE_INTERVAL_SECONDS", 30)) * time.Second
+
+	// vlmHealthyWindow is the staleness threshold for lastVLMSuccess. If we
+	// haven't seen a successful call (real or probe) in this window, we
+	// report degraded.
+	vlmHealthyWindow = time.Duration(envInt("VLM_HEALTHY_WINDOW_SECONDS", 90)) * time.Second
 )
+
+// 1x1 transparent PNG used by the startup/background probes. We need a real
+// inference roundtrip — not just a TLS dial — so SDK-level failures (lost
+// enclave connection, cert rotation gave up, model rotated to a new enclave
+// we can't reach) actually surface in /health.
+const probePNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 
 const vlmOCRPrompt = "Convert this page to markdown. Do not miss any text and only output the bare markdown!"
 
@@ -81,6 +106,7 @@ func vlmCall(ctx context.Context, imageB64, prompt string, maxTokens int) (strin
 	if len(resp.Choices) == 0 {
 		return "", fmt.Errorf("vlm: empty response")
 	}
+	lastVLMSuccess.Store(time.Now().UnixNano())
 
 	md := strings.TrimSpace(resp.Choices[0].Message.Content)
 	if strings.HasPrefix(md, "```") {
@@ -188,4 +214,59 @@ func vlmParallelMixed(ctx context.Context, work map[int]vlmWorkItem) map[int]vlm
 	}
 	wg.Wait()
 	return results
+}
+
+// vlmHealthy reports whether the VLM has succeeded recently. It is the
+// canonical signal for /health: a non-nil tinfoilVLM pointer alone is
+// insufficient because the SDK can lose its enclave connection, fail
+// attestation re-verification on cert rotation, or be pointing at a stale
+// enclave host after the model migrated to a new one.
+//
+// "Recent" is defined by vlmHealthyWindow (default 90s). lastVLMSuccess is
+// updated by both real traffic (vlmCall) and the background probe, so an
+// idle service still reports correctly as long as the watchdog is running.
+func vlmHealthy() bool {
+	if tinfoilVLM == nil {
+		return false
+	}
+	last := lastVLMSuccess.Load()
+	if last == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, last)) <= vlmHealthyWindow
+}
+
+// vlmProbe forces a real inference roundtrip with a 1x1 PNG. Used at
+// startup to seed lastVLMSuccess and by the background watchdog to flip
+// /health to degraded within vlmHealthyWindow when the VLM is broken.
+func vlmProbe(ctx context.Context) error {
+	if tinfoilVLM == nil {
+		return fmt.Errorf("VLM client not initialized")
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	_, err := vlmCall(probeCtx, probePNGBase64, "Reply with the single word OK.", 8)
+	return err
+}
+
+// vlmWatchdog runs forever, probing the VLM at vlmProbeInterval. Failures
+// are logged but never crash the router — when the upstream enclave comes
+// back, /health flips healthy on the next successful probe.
+func vlmWatchdog(ctx context.Context) {
+	if vlmProbeInterval <= 0 {
+		return
+	}
+	t := time.NewTicker(vlmProbeInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if err := vlmProbe(ctx); err != nil {
+			slog.Warn("vlm probe failed", "err", err,
+				"healthy", vlmHealthy(), "model", vlmModel)
+		}
+	}
 }
