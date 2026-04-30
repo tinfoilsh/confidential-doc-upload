@@ -187,8 +187,12 @@ func convertPDFVLM(ctx context.Context, data []byte, filename string, nPages int
 		res, ok := vlmResults[i]
 		if !ok || res.err != nil {
 			failed = append(failed, i)
-			if firstErr == nil && ok {
-				firstErr = res.err
+			if firstErr == nil {
+				if ok {
+					firstErr = res.err
+				} else {
+					firstErr = fmt.Errorf("page %d: missing result", i)
+				}
 			}
 			continue
 		}
