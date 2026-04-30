@@ -89,11 +89,14 @@ func vlmCall(ctx context.Context, kind, imageB64, prompt string, maxTokens int) 
 	metricVLMDuration.WithLabelValues(kind).Observe(time.Since(t0).Seconds())
 	if err != nil {
 		// Classify once: feeds both the prom counter and the health flip.
-		// "client" (other 4xx) leaves health untouched — request itself
-		// was bad; service is up.
+		// "client" (other 4xx) and "canceled" (caller-driven ctx errors)
+		// leave health untouched — the service itself isn't necessarily
+		// at fault.
 		var apiErr *openai.Error
 		var result string
 		switch {
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			result = "canceled"
 		case !errors.As(err, &apiErr):
 			result = "transport"
 		case apiErr.StatusCode == http.StatusUnauthorized,
@@ -105,7 +108,8 @@ func vlmCall(ctx context.Context, kind, imageB64, prompt string, maxTokens int) 
 			result = "client"
 		}
 		metricVLMCalls.WithLabelValues(kind, result).Inc()
-		if result != "client" {
+		switch result {
+		case "transport", "auth", "server":
 			vlmHealth.Store(false)
 		}
 		return "", fmt.Errorf("vlm: %w", err)
