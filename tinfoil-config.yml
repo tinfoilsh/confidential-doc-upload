@@ -5,6 +5,7 @@ memory: 16384
 containers:
   - name: "doc-upload"
     image: "ghcr.io/tinfoilsh/confidential-doc-upload@sha256:abdac072274712f82c34931f5f549736e86f56264c65727f8d3486791f393bdb" # v0.0.29
+    restart: always
     cap_add:
       - SYS_ADMIN
     env:
@@ -14,6 +15,11 @@ containers:
       - MAX_PARALLEL: "32"
     secrets:
       - TINFOIL_API_KEY
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5m
 
 shim:
   upstream-port: 5000
