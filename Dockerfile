@@ -33,6 +33,8 @@ RUN CGO_ENABLED=1 go build -o /app/bin/pdfparser -ldflags="-s -w" ./cmd/pdfparse
 # Stage 3: Runtime with minimal Python sidecar for non-PDF formats
 FROM python:3.12-alpine
 
+RUN apk add --no-cache curl
+
 RUN pip install --no-cache-dir \
     python-docx \
     python-pptx \
