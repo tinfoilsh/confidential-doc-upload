@@ -72,12 +72,16 @@ var (
 		}
 		return 0
 	})
+	metricVLMReinits = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "router_vlm_reinits_total",
+		Help: "Tinfoil SDK re-init attempts after persistent unhealth",
+	}, []string{"result"}) // success | error
 )
 
 func init() {
 	prometheus.MustRegister(metricReqs, metricDuration, metricActive, metricErrors,
 		metricPages, metricSize, metricDocType,
-		metricVLMCalls, metricVLMDuration, metricVLMHealthy)
+		metricVLMCalls, metricVLMDuration, metricVLMHealthy, metricVLMReinits)
 }
 
 func Main() {
