@@ -180,14 +180,26 @@ func convertPDFVLM(ctx context.Context, data []byte, filename string, nPages int
 
 	vlmResults := vlmParallelMixed(ctx, allWork)
 
-	var parts []string
+	parts := make([]string, nPages)
+	var failed []int
+	var firstErr error
 	for i := 1; i <= nPages; i++ {
-		if res, ok := vlmResults[i]; ok && res.err == nil {
-			parts = append(parts, res.text)
-		} else {
-			slog.Warn("vlm ocr failed", "page", i)
-			parts = append(parts, "[OCR failed]")
+		res, ok := vlmResults[i]
+		if !ok || res.err != nil {
+			failed = append(failed, i)
+			if firstErr == nil {
+				if ok {
+					firstErr = res.err
+				} else {
+					firstErr = fmt.Errorf("page %d: missing result", i)
+				}
+			}
+			continue
 		}
+		parts[i-1] = res.text
+	}
+	if len(failed) > 0 {
+		return ConvertResult{}, fmt.Errorf("vlm OCR failed for %d/%d pages %v: %w", len(failed), nPages, failed, firstErr)
 	}
 
 	slog.Info("processed", "file", filename, "pages", nPages,
@@ -221,13 +233,20 @@ func convertPDFText(ctx context.Context, data []byte, filename string, nPages in
 
 		if len(vlmWork) > 0 {
 			vlmResults := vlmParallelMixed(ctx, vlmWork)
+			var failed []int
+			var firstErr error
 			for idx, res := range vlmResults {
 				if res.err != nil {
-					slog.Warn("vlm ocr failed", "page", idx, "err", res.err)
-					textPages[idx] = "[OCR failed]"
-				} else {
-					textPages[idx] = res.text
+					failed = append(failed, idx)
+					if firstErr == nil {
+						firstErr = res.err
+					}
+					continue
 				}
+				textPages[idx] = res.text
+			}
+			if len(failed) > 0 {
+				return ConvertResult{}, fmt.Errorf("vlm OCR failed for %d scanned page(s) %v: %w", len(failed), failed, firstErr)
 			}
 		}
 	}
@@ -273,12 +292,17 @@ func convertPDFVision(ctx context.Context, data []byte, filename string, nPages 
 	vlmResults := vlmParallelMixed(ctx, allVLMWork)
 
 	visualDescs := make(map[int]string)
+	var ocrFailed []int
+	var firstOCRErr error
 	for idx, res := range vlmResults {
 		work := allVLMWork[idx]
 		if res.err != nil {
 			slog.Warn("vlm failed", "page", idx, "kind", work.kind, "err", res.err)
 			if work.kind == "ocr" {
-				textPages[idx] = "[OCR failed]"
+				ocrFailed = append(ocrFailed, idx)
+				if firstOCRErr == nil {
+					firstOCRErr = res.err
+				}
 			}
 			continue
 		}
@@ -290,6 +314,9 @@ func convertPDFVision(ctx context.Context, data []byte, filename string, nPages 
 				visualDescs[idx] = d
 			}
 		}
+	}
+	if len(ocrFailed) > 0 {
+		return ConvertResult{}, fmt.Errorf("vlm OCR failed for %d scanned page(s) %v: %w", len(ocrFailed), ocrFailed, firstOCRErr)
 	}
 
 	var parts []string

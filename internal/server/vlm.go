@@ -2,10 +2,14 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -17,7 +21,11 @@ var (
 	vlmKey   = envOr("TINFOIL_API_KEY", "")
 
 	tinfoilVLM *tinfoil.Client
+	// Tracks live VLM connectivity. Seeded true when the connection succeeds.
+	vlmHealth atomic.Bool
 )
+
+func vlmHealthy() bool { return vlmHealth.Load() }
 
 const vlmOCRPrompt = "Convert this page to markdown. Do not miss any text and only output the bare markdown!"
 
@@ -55,13 +63,16 @@ func initTinfoilClient() {
 		return
 	}
 	tinfoilVLM = client
+	vlmHealth.Store(true)
 	slog.Info("tinfoil VLM client initialized", "model", vlmModel)
 }
 
-func vlmCall(ctx context.Context, imageB64, prompt string, maxTokens int) (string, error) {
+func vlmCall(ctx context.Context, kind, imageB64, prompt string, maxTokens int) (string, error) {
 	if tinfoilVLM == nil {
+		metricVLMCalls.WithLabelValues(kind, "transport").Inc()
 		return "", fmt.Errorf("VLM client not initialized (missing TINFOIL_API_KEY?)")
 	}
+	t0 := time.Now()
 	resp, err := tinfoilVLM.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 		Model: vlmModel,
 		Messages: []openai.ChatCompletionMessageParamUnion{
@@ -75,12 +86,40 @@ func vlmCall(ctx context.Context, imageB64, prompt string, maxTokens int) (strin
 		MaxTokens:        openai.Int(int64(maxTokens)),
 		FrequencyPenalty: openai.Float(0.3),
 	})
+	metricVLMDuration.WithLabelValues(kind).Observe(time.Since(t0).Seconds())
 	if err != nil {
+		// Classify once: feeds both the prom counter and the health flip.
+		// "client" (other 4xx) and "canceled" (caller-driven ctx errors)
+		// leave health untouched — the service itself isn't necessarily
+		// at fault.
+		var apiErr *openai.Error
+		var result string
+		switch {
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			result = "canceled"
+		case !errors.As(err, &apiErr):
+			result = "transport"
+		case apiErr.StatusCode == http.StatusUnauthorized,
+			apiErr.StatusCode == http.StatusForbidden:
+			result = "auth"
+		case apiErr.StatusCode >= 500:
+			result = "server"
+		default:
+			result = "client"
+		}
+		metricVLMCalls.WithLabelValues(kind, result).Inc()
+		switch result {
+		case "transport", "auth", "server":
+			vlmHealth.Store(false)
+		}
 		return "", fmt.Errorf("vlm: %w", err)
 	}
+	vlmHealth.Store(true)
 	if len(resp.Choices) == 0 {
+		metricVLMCalls.WithLabelValues(kind, "empty").Inc()
 		return "", fmt.Errorf("vlm: empty response")
 	}
+	metricVLMCalls.WithLabelValues(kind, "success").Inc()
 
 	md := strings.TrimSpace(resp.Choices[0].Message.Content)
 	if strings.HasPrefix(md, "```") {
@@ -140,11 +179,11 @@ func truncateRepetition(s string) string {
 }
 
 func vlmFullPageOCR(ctx context.Context, imageB64 string) (string, error) {
-	return vlmCall(ctx, imageB64, vlmOCRPrompt, 8000)
+	return vlmCall(ctx, "ocr", imageB64, vlmOCRPrompt, 8000)
 }
 
 func vlmVisualExtract(ctx context.Context, imageB64 string) (string, error) {
-	return vlmCall(ctx, imageB64, vlmVisualPrompt, 4000)
+	return vlmCall(ctx, "vision", imageB64, vlmVisualPrompt, 4000)
 }
 
 type vlmPageFunc func(ctx context.Context, imageB64 string) (string, error)
