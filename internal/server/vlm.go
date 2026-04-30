@@ -20,12 +20,54 @@ var (
 	vlmModel = envOr("VLM_MODEL", "gemma4-31b")
 	vlmKey   = envOr("TINFOIL_API_KEY", "")
 
-	tinfoilVLM *tinfoil.Client
+	tinfoilVLM atomic.Pointer[tinfoil.Client]
 	// Tracks live VLM connectivity. Seeded true when the connection succeeds.
 	vlmHealth atomic.Bool
+	// unhealthySince (unix-nanos) is set when health flips from true→false,
+	// cleared on success. maybeReinitClient() uses it to decide when to ask
+	// the SDK to reconnect from scratch (handles enclave host rotation, etc).
+	unhealthySince atomic.Int64
+	reinitMu       sync.Mutex
 )
 
+const vlmReinitAfter = 5 * time.Minute
+
 func vlmHealthy() bool { return vlmHealth.Load() }
+
+func setVLMHealth(ok bool) {
+	vlmHealth.Store(ok)
+	if ok {
+		unhealthySince.Store(0)
+	} else {
+		unhealthySince.CompareAndSwap(0, time.Now().UnixNano())
+	}
+}
+
+// maybeReinitClient asks the tinfoil SDK to reconnect from scratch when the
+// VLM has been unhealthy for vlmReinitAfter.
+func maybeReinitClient() {
+	since := unhealthySince.Load()
+	if since == 0 || time.Since(time.Unix(0, since)) < vlmReinitAfter {
+		return
+	}
+	if !reinitMu.TryLock() {
+		return
+	}
+	defer reinitMu.Unlock()
+	if unhealthySince.Load() == 0 {
+		return
+	}
+	client, err := tinfoil.NewClient(option.WithAPIKey(vlmKey))
+	if err != nil {
+		metricVLMReinits.WithLabelValues("error").Inc()
+		slog.Warn("tinfoil re-init failed", "err", err)
+		unhealthySince.Store(time.Now().UnixNano())
+		return
+	}
+	tinfoilVLM.Store(client)
+	metricVLMReinits.WithLabelValues("success").Inc()
+	slog.Info("tinfoil client re-initialized", "enclave", client.Enclave())
+}
 
 const vlmOCRPrompt = "Convert this page to markdown. Do not miss any text and only output the bare markdown!"
 
@@ -62,18 +104,20 @@ func initTinfoilClient() {
 		slog.Error("failed to create Tinfoil client", "err", err)
 		return
 	}
-	tinfoilVLM = client
-	vlmHealth.Store(true)
+	tinfoilVLM.Store(client)
+	setVLMHealth(true)
 	slog.Info("tinfoil VLM client initialized", "model", vlmModel)
 }
 
 func vlmCall(ctx context.Context, kind, imageB64, prompt string, maxTokens int) (string, error) {
-	if tinfoilVLM == nil {
+	maybeReinitClient()
+	client := tinfoilVLM.Load()
+	if client == nil {
 		metricVLMCalls.WithLabelValues(kind, "transport").Inc()
 		return "", fmt.Errorf("VLM client not initialized (missing TINFOIL_API_KEY?)")
 	}
 	t0 := time.Now()
-	resp, err := tinfoilVLM.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+	resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 		Model: vlmModel,
 		Messages: []openai.ChatCompletionMessageParamUnion{
 			openai.UserMessage([]openai.ChatCompletionContentPartUnionParam{
@@ -114,7 +158,7 @@ func vlmCall(ctx context.Context, kind, imageB64, prompt string, maxTokens int) 
 		}
 		return "", fmt.Errorf("vlm: %w", err)
 	}
-	vlmHealth.Store(true)
+	setVLMHealth(true)
 	if len(resp.Choices) == 0 {
 		metricVLMCalls.WithLabelValues(kind, "empty").Inc()
 		return "", fmt.Errorf("vlm: empty response")
