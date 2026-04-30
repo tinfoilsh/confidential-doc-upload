@@ -154,7 +154,7 @@ func vlmCall(ctx context.Context, kind, imageB64, prompt string, maxTokens int) 
 		metricVLMCalls.WithLabelValues(kind, result).Inc()
 		switch result {
 		case "transport", "auth", "server":
-			vlmHealth.Store(false)
+			setVLMHealth(false)
 		}
 		return "", fmt.Errorf("vlm: %w", err)
 	}
