@@ -61,7 +61,10 @@ func maybeReinitClient() {
 	if err != nil {
 		metricVLMReinits.WithLabelValues("error").Inc()
 		slog.Warn("tinfoil re-init failed", "err", err)
-		unhealthySince.Store(time.Now().UnixNano())
+		// Push the backoff clock forward only if we're still unhealthy.
+		if !vlmHealth.Load() {
+			unhealthySince.Store(time.Now().UnixNano())
+		}
 		return
 	}
 	tinfoilVLM.Store(client)
