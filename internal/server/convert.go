@@ -20,6 +20,7 @@ func nextPow2(n int) int {
 
 type PageResult struct {
 	Page      int    `json:"page"`
+	Text      string `json:"text,omitempty"`
 	Image     string `json:"image,omitempty"`
 	IsScanned bool   `json:"is_scanned"`
 }
@@ -144,6 +145,7 @@ func convertPDFImages(ctx context.Context, data []byte, filename string, nPages 
 		parts = append(parts, textPages[i])
 		pages = append(pages, PageResult{
 			Page:      i,
+			Text:      textPages[i],
 			Image:     renderedMap[i],
 			IsScanned: scannedSet[i],
 		})
