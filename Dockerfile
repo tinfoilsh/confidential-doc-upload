@@ -1,5 +1,5 @@
 # Stage 1: Build MuPDF 1.27.2 from source (pinned + checksum verified)
-FROM alpine:3.21 AS mupdf-builder
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS mupdf-builder
 
 RUN apk add --no-cache build-base curl
 
@@ -16,7 +16,7 @@ RUN cd /tmp/mupdf-${MUPDF_VERSION}-source && \
     make HAVE_X11=no HAVE_GLUT=no HAVE_CURL=no build=release prefix=/usr/local install
 
 # Stage 2: Build Go binaries (router + parser linked against MuPDF)
-FROM golang:1.25-alpine AS go-builder
+FROM golang:1.25-alpine@sha256:8d22e29d960bc50cd025d93d5b7c7d220b1ee9aa7a239b3c8f55a57e987e8d45 AS go-builder
 
 RUN apk add --no-cache gcc musl-dev
 
@@ -31,7 +31,7 @@ RUN CGO_ENABLED=1 go build -o /app/bin/router -ldflags="-s -w" ./cmd/router
 RUN CGO_ENABLED=1 go build -o /app/bin/pdfparser -ldflags="-s -w" ./cmd/pdfparser
 
 # Stage 3: Runtime with minimal Python sidecar for non-PDF formats
-FROM python:3.12-alpine
+FROM python:3.12-alpine@sha256:236173eb74001afe2f60862de935b74fcbd00adfca247b2c27051a70a6a39a2d
 
 RUN apk add --no-cache curl
 
