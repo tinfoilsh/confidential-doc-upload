@@ -1,10 +1,11 @@
-cvm-version: 0.7.5
+cvm-version: 0.10.2
 cpus: 8
 memory: 16384
 
 containers:
   - name: "doc-upload"
     image: "ghcr.io/tinfoilsh/confidential-doc-upload@sha256:0000000000000000000000000000000000000000000000000000000000000000" # placeholder - populated during release
+    networks: ["egress"]
     restart: always
     cap_add:
       - SYS_ADMIN
@@ -20,6 +21,12 @@ containers:
       interval: 30s
       timeout: 5s
       start_period: 5m
+    tmpfs:
+      /tmp: size=512m,mode=1777,exec
+
+networks:
+  egress:
+    egress: open
 
 shim:
   upstream-port: 5000
