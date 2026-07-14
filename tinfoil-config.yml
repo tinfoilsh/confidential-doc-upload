@@ -31,6 +31,7 @@ shim:
   authenticated: true
   authenticated-endpoints:
     - /v1/convert/file
+    - /metrics
   paths:
     - /health
     - /metrics
