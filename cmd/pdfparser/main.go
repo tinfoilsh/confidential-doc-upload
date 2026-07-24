@@ -11,6 +11,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-doc-upload/internal/mupdf"
 	"github.com/tinfoilsh/confidential-doc-upload/internal/pdftomd"
+	"github.com/tinfoilsh/confidential-doc-upload/internal/sandbox"
 )
 
 type pageOutput struct {
@@ -27,6 +28,10 @@ type parseOutput struct {
 }
 
 func main() {
+	if err := sandbox.RestrictNetwork(); err != nil {
+		fatal("install network sandbox: %v", err)
+	}
+
 	render := flag.Bool("render", false, "include page images as base64 PNG")
 	dpi := flag.Int("dpi", 100, "DPI for page rendering")
 	flag.Parse()
@@ -84,4 +89,3 @@ func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "pdfparser: "+format+"\n", args...)
 	os.Exit(1)
 }
-

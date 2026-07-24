@@ -7,8 +7,6 @@ containers:
     image: "ghcr.io/tinfoilsh/confidential-doc-upload@sha256:0000000000000000000000000000000000000000000000000000000000000000" # placeholder - populated during release
     restart: always
     networks: [web]
-    cap_add:
-      - SYS_ADMIN
     env:
       - VLM_MODEL: "gemma4-31b"
       - SIDECAR_URL: "http://localhost:5002"

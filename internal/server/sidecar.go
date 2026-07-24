@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -54,8 +53,8 @@ const parserTimeoutSeconds = 120
 //
 // Security hardening:
 //   - Empty environment: no API keys or secrets accessible
-//   - Network namespace isolation (CLONE_NEWNET): no network access
-//   - Memory limit (RLIMIT_AS): prevents zip/decompression bombs
+//   - Parser-installed seccomp filter: no network syscalls
+//   - Parser Go heap budget: bounds managed allocations
 //   - Timeout: prevents hang on malicious PDFs
 //   - Process dies after each request: OS reclaims all memory
 func parsePDF(ctx context.Context, data []byte, args ...string) ([]byte, error) {
@@ -66,14 +65,6 @@ func parsePDF(ctx context.Context, data []byte, args ...string) ([]byte, error) 
 	cmd.Stdin = bytes.NewReader(data)
 	cmd.Env = []string{} // empty env: no secrets
 	cmd.Dir = os.TempDir()
-
-	// CLONE_NEWNET requires CAP_SYS_ADMIN (or --privileged).
-	// Default: sandbox enabled. Set DISABLE_PARSER_SANDBOX=1 for local dev only.
-	if os.Getenv("DISABLE_PARSER_SANDBOX") != "1" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Cloneflags: syscall.CLONE_NEWNET,
-		}
-	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

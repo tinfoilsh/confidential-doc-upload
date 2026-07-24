@@ -36,12 +36,17 @@ PDF parsing runs untrusted C code (MuPDF) on user-uploaded files. Each PDF is pa
 | ----------------------- | ----------------------------------------------------------------------------------------------- |
 | **Process-per-request** | Parser subprocess is forked, runs, exits. OS reclaims all memory. Zero cross-user data leakage. |
 | **Empty environment**   | No env vars — no API keys, no secrets, nothing to steal.                                        |
-| **No network**          | `CLONE_NEWNET` — empty network stack. Cannot reach the VLM or the internet.                     |
-| **Memory limit**        | 512MB. Decompression bombs are killed.                                                          |
+| **No network**          | Process-wide seccomp filter rejects network syscalls. Cannot reach the VLM or the internet.     |
+| **Go heap budget**      | 512MB parser heap target limits managed-memory growth.                                          |
 | **Timeout**             | 120s hard kill. Malicious PDFs cannot hang the service.                                         |
 
 
-The parser reads PDF bytes from stdin, writes JSON to stdout, and exits. It cannot open files, make connections, or access secrets. VLM calls use the [Tinfoil SDK](https://github.com/tinfoilsh/tinfoil-go) with remote attestation. MuPDF is built from source with a pinned SHA256 checksum.
+The parser reads PDF bytes from stdin, writes JSON to stdout, and exits. It
+cannot make network connections and receives an empty environment, so VLM API
+credentials are not exposed to the parser process. The container root is
+read-only under the Tinfoil runtime. VLM calls use the [Tinfoil SDK](https://github.com/tinfoilsh/tinfoil-go)
+with remote attestation. MuPDF is built from source with a pinned SHA256
+checksum.
 
 ## API
 
@@ -144,9 +149,10 @@ The PDF parser produces markdown with:
 
 ```bash
 docker build -t doc-upload .
-docker run -d --name doc-upload --network host --privileged \
+docker run -d --name doc-upload -p 5000:5000 \
     -e TINFOIL_API_KEY=your-key doc-upload
 curl -F "files=@test.pdf" http://localhost:5000/v1/convert/file?mode=raw
 ```
 
-`--privileged` is required for `CLONE_NEWNET` sandbox isolation. In production this runs inside a Tinfoil CVM.
+The PDF parser installs its own fail-closed network seccomp filter. The
+container does not require `--privileged` or additional Linux capabilities.
