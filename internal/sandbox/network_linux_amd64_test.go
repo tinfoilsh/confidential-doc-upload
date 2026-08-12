@@ -22,6 +22,10 @@ func TestRestrictNetworkRejectsSockets(t *testing.T) {
 		if !errors.Is(err, unix.EPERM) {
 			os.Exit(4)
 		}
+		_, _, errno := unix.Syscall(unix.SYS_IO_URING_SETUP, 1, 0, 0)
+		if errno != unix.EPERM {
+			os.Exit(5)
+		}
 		os.Exit(0)
 	}
 
@@ -36,8 +40,11 @@ func TestNetworkFiltersRejectEveryNetworkSyscall(t *testing.T) {
 	filters := networkFilters()
 	for _, syscallNumber := range networkSyscalls {
 		found := false
-		for index := 6; index+1 < len(filters); index += 2 {
-			if filters[index].K == syscallNumber && filters[index+1].K == unix.SECCOMP_RET_ERRNO|uint32(unix.EPERM) {
+		for index := 0; index+1 < len(filters); index++ {
+			if filters[index].Code == unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K &&
+				filters[index].K == syscallNumber &&
+				filters[index+1].Code == unix.BPF_RET|unix.BPF_K &&
+				filters[index+1].K == unix.SECCOMP_RET_ERRNO|uint32(unix.EPERM) {
 				found = true
 				break
 			}

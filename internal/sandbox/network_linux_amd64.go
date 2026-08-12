@@ -32,6 +32,9 @@ var networkSyscalls = []uint32{
 	unix.SYS_SETSOCKOPT,
 	unix.SYS_GETSOCKOPT,
 	unix.SYS_SHUTDOWN,
+	unix.SYS_IO_URING_SETUP,
+	unix.SYS_IO_URING_ENTER,
+	unix.SYS_IO_URING_REGISTER,
 }
 
 // RestrictNetwork installs a process-wide seccomp filter that rejects network
