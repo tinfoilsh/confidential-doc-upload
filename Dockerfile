@@ -64,6 +64,8 @@ RUN chown 65532:65532 /usr/local/bin/python3.12 && \
 
 EXPOSE 5000
 
-USER 65532:65532
+# The default command is the secret-bearing router. The parser deployment
+# explicitly overrides this with its distinct owner UID.
+USER 65533:65532
 
 CMD ["/usr/local/bin/router"]

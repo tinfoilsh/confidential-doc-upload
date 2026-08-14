@@ -223,7 +223,7 @@ The PDF parser produces markdown with:
 | `MAX_FILE_SIZE_MB` | `50` | Per-file limit, bounded to 1–64 MiB |
 | `MAX_FILES` | `10` | Files per request, bounded to 1–10 |
 | `MAX_PARTS` | `64` | Multipart parts, bounded to 1–128 |
-| `MAX_ACTIVE_REQUESTS` | `4` | Admitted requests, bounded to 1–32 |
+| `MAX_ACTIVE_REQUESTS` | `4` | Admitted requests, bounded to 1–4 to cap buffered upload memory |
 | `MAX_PARALLEL` | `8` | VLM calls per request, bounded to 1–32 |
 | `PARSER_TIMEOUT_SECONDS` | `120` | Parser wall/CPU limit, bounded to 1–300 seconds |
 | `PARSER_MEMORY_LIMIT_MB` | `1536` | Parser address-space limit, bounded to 512–4096 MiB |

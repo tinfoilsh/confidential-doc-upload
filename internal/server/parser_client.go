@@ -41,16 +41,27 @@ type RenderResult struct {
 var parserSocketPath = envOr("PARSER_SOCKET", "/run/docparser/parser.sock")
 
 var parserHTTPClient = &http.Client{
-	Timeout: 310 * time.Second,
-	Transport: &http.Transport{
+	Timeout:   310 * time.Second,
+	Transport: parserTransport(8),
+}
+
+// Health probes use an independent connection budget, so queued conversions
+// cannot make a healthy broker appear unavailable under load.
+var parserHealthClient = &http.Client{
+	Timeout:   2 * time.Second,
+	Transport: parserTransport(1),
+}
+
+func parserTransport(maxConnections int) *http.Transport {
+	return &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var dialer net.Dialer
 			return dialer.DialContext(ctx, "unix", parserSocketPath)
 		},
-		MaxConnsPerHost:     8,
+		MaxConnsPerHost:     maxConnections,
 		MaxIdleConnsPerHost: 2,
 		IdleConnTimeout:     30 * time.Second,
-	},
+	}
 }
 
 func sidecarExtract(ctx context.Context, data []byte, filename string) (ExtractResult, error) {
@@ -124,7 +135,7 @@ func parserHealthy() bool {
 	if err != nil {
 		return false
 	}
-	response, err := parserHTTPClient.Do(request)
+	response, err := parserHealthClient.Do(request)
 	if err != nil {
 		return false
 	}

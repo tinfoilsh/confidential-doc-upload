@@ -27,6 +27,12 @@ func TestRestrictFilesystemEnforcesAllowlist(t *testing.T) {
 		}
 		os.Exit(0)
 	}
+	if _, err := landlockABI(); err != nil {
+		if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EOPNOTSUPP) {
+			t.Skipf("host kernel does not support Landlock: %v", err)
+		}
+		t.Fatalf("query Landlock support: %v", err)
+	}
 
 	command := exec.Command(os.Args[0], "-test.run=^TestRestrictFilesystemEnforcesAllowlist$")
 	command.Env = []string{"TEST_LANDLOCK_HELPER=1"}

@@ -36,6 +36,22 @@ func TestRandomNameFailsClosedWithoutEntropy(t *testing.T) {
 		t.Fatalf("randomNameFrom() = %q", name)
 	}
 
+	name, err = randomNameFrom(strings.NewReader("0123456789abcdef"), "extensionless")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "30313233343536373839616263646566.pdf" {
+		t.Fatalf("extensionless randomNameFrom() = %q", name)
+	}
+
+	name, err = randomNameFrom(strings.NewReader("0123456789abcdef"), "report.doc-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "30313233343536373839616263646566.bin" {
+		t.Fatalf("unsafe-extension randomNameFrom() = %q", name)
+	}
+
 	failing := errorReader{err: errors.New("entropy source failed")}
 	if _, err := randomNameFrom(failing, "report.pdf"); err == nil {
 		t.Fatal("randomNameFrom() ignored entropy source failure")

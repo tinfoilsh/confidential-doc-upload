@@ -29,7 +29,10 @@ var (
 	maxFiles    = boundedEnvInt("MAX_FILES", 10, 1, 10)
 	maxParts    = boundedEnvInt("MAX_PARTS", 64, 1, 128)
 	maxParallel = boundedEnvInt("MAX_PARALLEL", 8, 1, 32)
-	maxActive   = boundedEnvInt("MAX_ACTIVE_REQUESTS", 4, 1, 32)
+	// Four worst-case multipart bodies remain bounded below the router's 6 GiB
+	// cgroup limit. Higher admission provides no parser throughput benefit
+	// because the broker deliberately admits at most two parser children.
+	maxActive   = boundedEnvInt("MAX_ACTIVE_REQUESTS", 4, 1, 4)
 	requestGate = make(chan struct{}, maxActive)
 	// Multi-file requests may use two workers, but all requests together can
 	// never exceed the pre-existing MAX_ACTIVE_REQUESTS work ceiling.
@@ -326,7 +329,9 @@ func randomNameFrom(random io.Reader, orig string) (string, error) {
 		return "", fmt.Errorf("read document identifier entropy: %w", err)
 	}
 	ext := strings.ToLower(filepath.Ext(orig))
-	if !safeExtension(ext) {
+	if ext == "" {
+		ext = ".pdf"
+	} else if !safeExtension(ext) {
 		ext = ".bin"
 	}
 	return hex.EncodeToString(b[:]) + ext, nil

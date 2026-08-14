@@ -97,6 +97,7 @@ var filesystemMutationSyscalls = []uint32{
 	unix.SYS_CHMOD,
 	unix.SYS_FCHMOD,
 	unix.SYS_FCHMODAT,
+	unix.SYS_FCHMODAT2,
 	unix.SYS_CHOWN,
 	unix.SYS_FCHOWN,
 	unix.SYS_LCHOWN,

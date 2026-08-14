@@ -5,7 +5,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -22,7 +21,6 @@ func main() {
 	dialer := &net.Dialer{Timeout: 2 * time.Second}
 	transport := &http.Transport{
 		DialContext:         dialer.DialContext,
-		DisableKeepAlives:   true,
 		TLSHandshakeTimeout: 2 * time.Second,
 	}
 	if *socketPath != "" {
@@ -31,7 +29,7 @@ func main() {
 		}
 	}
 	client := &http.Client{
-		Timeout: 3 * time.Second,
+		Timeout:   3 * time.Second,
 		Transport: transport,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -42,8 +40,7 @@ func main() {
 	if err != nil {
 		fatal("probe failed: %v", err)
 	}
-	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1024))
+	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		fatal("unexpected status %d", response.StatusCode)
 	}

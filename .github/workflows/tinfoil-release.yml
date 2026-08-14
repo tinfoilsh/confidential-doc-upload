@@ -46,18 +46,6 @@ jobs:
               /usr/local/go/bin/go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
             '
 
-      - name: Build final image for package and OS scanning
-        run: docker build -t doc-upload-security-candidate .
-
-      - name: Scan final image vulnerabilities
-        run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
-            image --image-src docker --scanners vuln \
-            --severity LOW,MEDIUM,HIGH,CRITICAL --exit-code 1 \
-            doc-upload-security-candidate
-
   build:
     needs: security
     runs-on: ubuntu-latest
@@ -115,6 +103,17 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ inputs.version }}
+
+      - name: Scan the exact pushed image digest
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker run --rm \
+            -v "$HOME/.docker:/root/.docker:ro" \
+            aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
+            image --scanners vuln \
+            --severity LOW,MEDIUM,HIGH,CRITICAL --exit-code 1 \
+            "ghcr.io/$GITHUB_REPOSITORY@$IMAGE_DIGEST"
 
   prepare-release:
     needs: build

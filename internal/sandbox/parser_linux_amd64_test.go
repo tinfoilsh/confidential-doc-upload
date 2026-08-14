@@ -61,13 +61,13 @@ func runParserSandboxAssertions() {
 		os.Exit(18)
 	}
 	if err := unix.Prlimit(os.Getppid(), unix.RLIMIT_NOFILE, nil, nil); !errors.Is(err, unix.EPERM) {
-		os.Exit(21)
-	}
-	if err := unix.Unshare(unix.CLONE_NEWUSER); !errors.Is(err, unix.EPERM) {
 		os.Exit(19)
 	}
-	if err := unix.Unlink("/tmp/does-not-exist"); !errors.Is(err, unix.EPERM) {
+	if err := unix.Unshare(unix.CLONE_NEWUSER); !errors.Is(err, unix.EPERM) {
 		os.Exit(20)
+	}
+	if err := unix.Unlink("/tmp/does-not-exist"); !errors.Is(err, unix.EPERM) {
+		os.Exit(21)
 	}
 }
 

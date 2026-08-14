@@ -207,13 +207,6 @@ func lockSocketDirectory(socketPath string) (*os.File, error) {
 }
 
 func prepareSocket(socketPath string) error {
-	directory := filepath.Dir(socketPath)
-	if err := os.MkdirAll(directory, 0750); err != nil {
-		return err
-	}
-	if err := os.Chmod(directory, 0750); err != nil {
-		return err
-	}
 	info, err := os.Lstat(socketPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

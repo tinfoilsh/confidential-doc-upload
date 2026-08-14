@@ -29,20 +29,21 @@ type Limits struct {
 // ApplyLimits installs hard kernel resource limits inherited across exec.
 func ApplyLimits(limits Limits) error {
 	settings := []struct {
-		resource int
-		value    uint64
-		name     string
+		resource  int
+		value     uint64
+		name      string
+		allowZero bool
 	}{
-		{unix.RLIMIT_AS, limits.AddressSpaceBytes, "address space"},
-		{unix.RLIMIT_CPU, limits.CPUSeconds, "CPU"},
-		{unix.RLIMIT_NOFILE, limits.OpenFiles, "open files"},
-		{unix.RLIMIT_FSIZE, 0, "file size"},
-		{unix.RLIMIT_CORE, 0, "core dump"},
-		{unix.RLIMIT_MEMLOCK, 0, "locked memory"},
-		{unix.RLIMIT_MSGQUEUE, 0, "message queue"},
+		{resource: unix.RLIMIT_AS, value: limits.AddressSpaceBytes, name: "address space"},
+		{resource: unix.RLIMIT_CPU, value: limits.CPUSeconds, name: "CPU"},
+		{resource: unix.RLIMIT_NOFILE, value: limits.OpenFiles, name: "open files"},
+		{resource: unix.RLIMIT_FSIZE, name: "file size", allowZero: true},
+		{resource: unix.RLIMIT_CORE, name: "core dump", allowZero: true},
+		{resource: unix.RLIMIT_MEMLOCK, name: "locked memory", allowZero: true},
+		{resource: unix.RLIMIT_MSGQUEUE, name: "message queue", allowZero: true},
 	}
 	for _, setting := range settings {
-		if setting.value == 0 && setting.resource != unix.RLIMIT_FSIZE && setting.resource != unix.RLIMIT_CORE && setting.resource != unix.RLIMIT_MEMLOCK && setting.resource != unix.RLIMIT_MSGQUEUE {
+		if setting.value == 0 && !setting.allowZero {
 			return fmt.Errorf("%s limit must be positive", setting.name)
 		}
 		limit := unix.Rlimit{Cur: setting.value, Max: setting.value}
