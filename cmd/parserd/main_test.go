@@ -36,8 +36,16 @@ func TestParserSlotHonorsCancellation(t *testing.T) {
 	slots <- struct{}{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := acquireParserSlot(ctx, slots); !errors.Is(err, context.Canceled) {
+	if err := acquireParserSlot(ctx, slots, time.Second); !errors.Is(err, context.Canceled) {
 		t.Fatalf("acquireParserSlot() = %v, want context.Canceled", err)
+	}
+}
+
+func TestParserSlotRejectsBoundedQueue(t *testing.T) {
+	slots := make(chan struct{}, 1)
+	slots <- struct{}{}
+	if err := acquireParserSlot(context.Background(), slots, time.Millisecond); !errors.Is(err, errParserBusy) {
+		t.Fatalf("acquireParserSlot() = %v, want errParserBusy", err)
 	}
 }
 

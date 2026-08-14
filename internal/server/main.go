@@ -26,17 +26,21 @@ import (
 var (
 	listenAddr  = envOr("ROUTER_PORT", "5000")
 	maxFileMB   = boundedEnvInt("MAX_FILE_SIZE_MB", 50, 1, 64)
-	maxFiles    = boundedEnvInt("MAX_FILES", 10, 1, 10)
+	maxFiles    = boundedEnvInt("MAX_FILES", 2, 1, 2)
 	maxParts    = boundedEnvInt("MAX_PARTS", 64, 1, 128)
 	maxParallel = boundedEnvInt("MAX_PARALLEL", 8, 1, 32)
-	// Four worst-case multipart bodies remain bounded below the router's 6 GiB
-	// cgroup limit. Higher admission provides no parser throughput benefit
-	// because the broker deliberately admits at most two parser children.
+	// Combined with the two-file batch limit, the 256 MiB parser-output ceiling,
+	// and the one-file image-mode limit, four requests keep retained results and
+	// buffered uploads below the router's 6 GiB cgroup limit. Higher admission
+	// provides no parser throughput benefit because the broker admits two children.
 	maxActive   = boundedEnvInt("MAX_ACTIVE_REQUESTS", 4, 1, 4)
 	requestGate = make(chan struct{}, maxActive)
 	// Multi-file requests may use two workers, but all requests together can
 	// never exceed the pre-existing MAX_ACTIVE_REQUESTS work ceiling.
 	documentGate = make(chan struct{}, maxActive)
+	// One service-wide VLM budget prevents concurrent files or requests from
+	// multiplying the configured outbound fan-out.
+	vlmGate = make(chan struct{}, maxParallel)
 
 	metricReqs     = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "router_requests_total"}, []string{"format", "mode"})
 	metricDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "router_duration_seconds", Buckets: prometheus.ExponentialBuckets(0.01, 2, 14)}, []string{"format", "mode"})
@@ -171,7 +175,8 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, int64(maxFiles*maxFileMB+10)*1024*1024)
+	fileLimit := requestFileLimit(mode)
+	r.Body = http.MaxBytesReader(w, r.Body, int64(fileLimit*maxFileMB+10)*1024*1024)
 	ct := r.Header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(ct)
 	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
@@ -199,7 +204,7 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 		}
 		if part.FormName() == "files" {
 			originalName := part.FileName()
-			if len(files) >= maxFiles {
+			if len(files) >= fileLimit {
 				part.Close()
 				httpErr(w, 400, "too many files")
 				return
@@ -347,6 +352,16 @@ func safeExtension(extension string) bool {
 		}
 	}
 	return true
+}
+
+func requestFileLimit(mode string) int {
+	// Image responses retain base64 page data until JSON encoding completes.
+	// A single-file cap, combined with the 256 MiB parser-output ceiling and
+	// four-request admission limit, bounds retained image results to 1 GiB.
+	if mode == "images" {
+		return 1
+	}
+	return maxFiles
 }
 
 func httpErr(w http.ResponseWriter, code int, msg string, attrs ...any) {

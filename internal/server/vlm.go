@@ -17,10 +17,8 @@ import (
 )
 
 var (
-	vlmModel          = envOr("VLM_MODEL", "gemma4-31b")
-	vlmKey            = envOr("TINFOIL_API_KEY", "")
-	vlmProxyURL       = envOr("TINFOIL_PROXY_URL", "https://inference.tinfoil.sh/v1/")
-	vlmAttestationURL = envOr("TINFOIL_ATTESTATION_URL", "https://atc.tinfoil.sh")
+	vlmModel = envOr("VLM_MODEL", "gemma4-31b")
+	vlmKey   = envOr("TINFOIL_API_KEY", "")
 
 	tinfoilVLM atomic.Pointer[tinfoil.Client]
 	// Tracks live VLM connectivity. Seeded true when the connection succeeds.
@@ -32,7 +30,11 @@ var (
 	reinitMu       sync.Mutex
 )
 
-const vlmReinitAfter = 5 * time.Minute
+const (
+	vlmReinitAfter    = 5 * time.Minute
+	vlmProxyURL       = "https://inference.tinfoil.sh/v1/"
+	vlmAttestationURL = "https://atc.tinfoil.sh"
+)
 
 func vlmHealthy() bool { return vlmHealth.Load() }
 
@@ -262,15 +264,13 @@ func vlmParallelMixed(ctx context.Context, work map[int]vlmWorkItem) map[int]vlm
 	results := make(map[int]vlmResult)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, maxParallel)
-
 	for idx, item := range work {
 		wg.Add(1)
 		go func(pageIdx int, w vlmWorkItem) {
 			defer wg.Done()
 			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
+			case vlmGate <- struct{}{}:
+				defer func() { <-vlmGate }()
 			case <-ctx.Done():
 				mu.Lock()
 				results[pageIdx] = vlmResult{err: ctx.Err()}

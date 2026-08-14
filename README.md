@@ -215,19 +215,17 @@ The PDF parser produces markdown with:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TINFOIL_API_KEY` | required for VLM modes | Router-only Tinfoil VLM key |
-| `TINFOIL_PROXY_URL` | `https://inference.tinfoil.sh/v1/` | Fixed encrypted-inference proxy; keep aligned with the cvm egress allowlist |
-| `TINFOIL_ATTESTATION_URL` | `https://atc.tinfoil.sh` | Fixed client-verified attestation-bundle origin; keep aligned with the cvm egress allowlist |
 | `VLM_MODEL` | `gemma4-31b` | VLM model name |
 | `ROUTER_PORT` | `5000` | Router listen port |
 | `PARSER_SOCKET` | `/run/docparser/parser.sock` | Private router/parser Unix socket |
 | `MAX_FILE_SIZE_MB` | `50` | Per-file limit, bounded to 1–64 MiB |
-| `MAX_FILES` | `10` | Files per request, bounded to 1–10 |
+| `MAX_FILES` | `2` | Files per request, bounded to 1–2; `images` mode accepts one file |
 | `MAX_PARTS` | `64` | Multipart parts, bounded to 1–128 |
 | `MAX_ACTIVE_REQUESTS` | `4` | Admitted requests, bounded to 1–4 to cap buffered upload memory |
-| `MAX_PARALLEL` | `8` | VLM calls per request, bounded to 1–32 |
+| `MAX_PARALLEL` | `8` | Service-wide concurrent VLM calls, bounded to 1–32 |
 | `PARSER_TIMEOUT_SECONDS` | `120` | Parser wall/CPU limit, bounded to 1–300 seconds |
-| `PARSER_MEMORY_LIMIT_MB` | `1536` | Parser address-space limit, bounded to 512–4096 MiB |
-| `PARSER_MAX_OUTPUT_MB` | `256` | Child and broker response limit, bounded to 1–512 MiB |
+| `PARSER_MEMORY_LIMIT_MB` | `1536` | Parser address-space limit, bounded to 1024–4096 MiB |
+| `PARSER_MAX_OUTPUT_MB` | `256` | Child and broker response limit, bounded to 1–256 MiB |
 | `PARSER_WORKERS` | `2` | Parser processes, bounded to 1–2; set to 1 for strict serialization |
 
 

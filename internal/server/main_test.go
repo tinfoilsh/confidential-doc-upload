@@ -23,6 +23,15 @@ func TestSafeExtension(t *testing.T) {
 	}
 }
 
+func TestRequestFileLimitBoundsImageResults(t *testing.T) {
+	if got := requestFileLimit("images"); got != 1 {
+		t.Fatalf("requestFileLimit(images) = %d, want 1", got)
+	}
+	if got := requestFileLimit("raw"); got != maxFiles {
+		t.Fatalf("requestFileLimit(raw) = %d, want %d", got, maxFiles)
+	}
+}
+
 func TestRandomNameFailsClosedWithoutEntropy(t *testing.T) {
 	if _, err := randomNameFrom(strings.NewReader("short"), "report.pdf"); err == nil {
 		t.Fatal("randomNameFrom() accepted insufficient entropy")

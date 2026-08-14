@@ -114,7 +114,7 @@ func parserPost(ctx context.Context, endpoint string, data []byte, filename stri
 	}
 	defer response.Body.Close()
 
-	maxResponseBytes := int64(boundedEnvInt("PARSER_MAX_OUTPUT_MB", 256, 1, 512)) * 1024 * 1024
+	maxResponseBytes := int64(boundedEnvInt("PARSER_MAX_OUTPUT_MB", 256, 1, 256)) * 1024 * 1024
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read parser response: %w", err)

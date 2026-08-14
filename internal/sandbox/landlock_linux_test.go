@@ -56,6 +56,14 @@ func TestParserRuntimePathsExposeOnlySelectedParser(t *testing.T) {
 			t.Fatalf("%s is not executable", path)
 		}
 	}
+	assertAbsent := func(rules []filesystemRule, path string) {
+		t.Helper()
+		for _, rule := range rules {
+			if rule.path == path {
+				t.Fatalf("%s unexpectedly visible in parser sandbox", path)
+			}
+		}
+	}
 
 	pdfRules, err := parserRuntimePaths(pdfParserExecutable)
 	if err != nil {
@@ -65,14 +73,17 @@ func TestParserRuntimePathsExposeOnlySelectedParser(t *testing.T) {
 		t.Fatalf("PDF sandbox has %d paths, want only loader and parser", len(pdfRules))
 	}
 	assertExecutable(pdfRules, pdfParserExecutable, true)
-	assertExecutable(pdfRules, pythonExecutable, false)
+	assertAbsent(pdfRules, pythonExecutable)
 
 	pythonRules, err := parserRuntimePaths(pythonExecutable)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(pythonRules) != 7 {
+		t.Fatalf("Python sandbox has %d paths, want only loader, parser, and runtime", len(pythonRules))
+	}
 	assertExecutable(pythonRules, pythonExecutable, true)
-	assertExecutable(pythonRules, pdfParserExecutable, false)
+	assertAbsent(pythonRules, pdfParserExecutable)
 
 	if _, err := parserRuntimePaths("/bin/sh"); err == nil {
 		t.Fatal("parserRuntimePaths() accepted an unsupported executable")

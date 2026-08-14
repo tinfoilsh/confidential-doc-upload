@@ -38,7 +38,6 @@ func ApplyLimits(limits Limits) error {
 		{resource: unix.RLIMIT_CPU, value: limits.CPUSeconds, name: "CPU"},
 		{resource: unix.RLIMIT_NOFILE, value: limits.OpenFiles, name: "open files"},
 		{resource: unix.RLIMIT_FSIZE, name: "file size", allowZero: true},
-		{resource: unix.RLIMIT_CORE, name: "core dump", allowZero: true},
 		{resource: unix.RLIMIT_MEMLOCK, name: "locked memory", allowZero: true},
 		{resource: unix.RLIMIT_MSGQUEUE, name: "message queue", allowZero: true},
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,13 @@ import (
 const maxDocumentBytes = 64 * 1024 * 1024
 
 const (
+	parserQueueTimeout = 5 * time.Second
+	parserProbeTimeout = 10 * time.Second
+)
+
+var errParserBusy = errors.New("parser workers busy")
+
+const (
 	parserUID = uint32(65532)
 	routerUID = uint32(65533)
 )
@@ -29,6 +37,11 @@ const (
 func main() {
 	if err := sandbox.ProtectProcess(); err != nil {
 		fatal("protect parser broker: %v", err)
+	}
+	// Do not advertise broker readiness unless both immutable parser runtimes
+	// can actually cross the sandbox/exec boundary and process a document.
+	if err := probeParserRuntimes(); err != nil {
+		fatal("probe parser runtimes: %v", err)
 	}
 
 	socketPath := envOr("PARSER_SOCKET", "/run/docparser/parser.sock")
@@ -81,8 +94,11 @@ func main() {
 }
 
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
+	// The listener opens only after both parser runtimes pass probeParserRuntimes.
+	// Their executables and libraries live on the container's read-only rootfs,
+	// so broker liveness also proves the immutable runtime passed readiness.
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = io.WriteString(w, `{"status":"ok"}`+"\n")
+	_, _ = io.WriteString(w, `{"status":"ok","runtimes":"probed"}`+"\n")
 }
 
 func handleParse(operation parser.Operation, parserSlots chan struct{}) http.HandlerFunc {
@@ -106,7 +122,11 @@ func handleParse(operation parser.Operation, parserSlots chan struct{}) http.Han
 		}
 		// Admit work before buffering its body. This bounds both parser process
 		// count and parser-side document memory to PARSER_WORKERS.
-		if err := acquireParserSlot(request.Context(), parserSlots); err != nil {
+		if err := acquireParserSlot(request.Context(), parserSlots, parserQueueTimeout); err != nil {
+			if errors.Is(err, errParserBusy) {
+				w.Header().Set("Retry-After", strconv.Itoa(int(parserQueueTimeout/time.Second)))
+				http.Error(w, "parser busy", http.StatusTooManyRequests)
+			}
 			return
 		}
 		defer func() { <-parserSlots }()
@@ -130,13 +150,63 @@ func handleParse(operation parser.Operation, parserSlots chan struct{}) http.Han
 	}
 }
 
-func acquireParserSlot(ctx context.Context, slots chan struct{}) error {
+func acquireParserSlot(ctx context.Context, slots chan struct{}, timeout time.Duration) error {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case slots <- struct{}{}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-timer.C:
+		return errParserBusy
 	}
+}
+
+func probeParserRuntimes() error {
+	probes := []struct {
+		name      string
+		data      []byte
+		format    string
+		pageCount int
+		markdown  string
+	}{
+		{
+			name:      "00000000000000000000000000000000.pdf",
+			format:    "pdf",
+			pageCount: 1,
+			data: []byte("%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n" +
+				"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n" +
+				"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] >>\nendobj\n" +
+				"trailer\n<< /Root 1 0 R >>\n%%EOF\n"),
+		},
+		{
+			name:     "00000000000000000000000000000000.txt",
+			data:     []byte("parser-ready"),
+			format:   "text",
+			markdown: "parser-ready",
+		},
+	}
+	for _, probe := range probes {
+		ctx, cancel := context.WithTimeout(context.Background(), parserProbeTimeout)
+		output, err := parser.Run(ctx, probe.data, probe.name, parser.Extract, 100)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("%s: %w", filepath.Ext(probe.name), err)
+		}
+		var result struct {
+			Format    string `json:"format"`
+			PageCount int    `json:"page_count"`
+			MDContent string `json:"md_content"`
+		}
+		if err := json.Unmarshal(output, &result); err != nil {
+			return fmt.Errorf("%s returned invalid JSON: %w", filepath.Ext(probe.name), err)
+		}
+		if result.Format != probe.format || result.PageCount != probe.pageCount || result.MDContent != probe.markdown {
+			return fmt.Errorf("%s returned an unexpected readiness result", filepath.Ext(probe.name))
+		}
+	}
+	return nil
 }
 
 // credentialListener authenticates Unix-socket peers at the kernel boundary.

@@ -16,11 +16,10 @@ containers:
       - parser-socket:/run/docparser
     env:
       - VLM_MODEL: "gemma4-31b"
-      - TINFOIL_PROXY_URL: "https://inference.tinfoil.sh/v1/"
-      - TINFOIL_ATTESTATION_URL: "https://atc.tinfoil.sh"
       - ROUTER_PORT: "5000"
       - PARSER_SOCKET: "/run/docparser/parser.sock"
       - PARSER_MAX_OUTPUT_MB: "256"
+      - MAX_FILES: "2"
       - MAX_PARALLEL: "8"
       - MAX_ACTIVE_REQUESTS: "4"
     secrets:

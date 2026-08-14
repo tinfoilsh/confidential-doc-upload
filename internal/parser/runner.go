@@ -46,8 +46,8 @@ func Run(ctx context.Context, data []byte, filename string, operation Operation,
 	}
 
 	timeoutSeconds := boundedEnvInt("PARSER_TIMEOUT_SECONDS", defaultTimeoutSeconds, 1, 300)
-	memoryMB := boundedEnvInt("PARSER_MEMORY_LIMIT_MB", defaultMemoryMB, 512, 4096)
-	maxOutputMB := boundedEnvInt("PARSER_MAX_OUTPUT_MB", defaultMaxOutputMB, 1, 512)
+	memoryMB := boundedEnvInt("PARSER_MEMORY_LIMIT_MB", defaultMemoryMB, 1024, 4096)
+	maxOutputMB := boundedEnvInt("PARSER_MAX_OUTPUT_MB", defaultMaxOutputMB, 1, 256)
 
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()

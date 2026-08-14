@@ -25,8 +25,8 @@ func main() {
 	if len(command) == 0 || command[0] == "" || command[0][0] != '/' {
 		fatal("an absolute parser command is required after --")
 	}
-	if *memoryMB < 512 || *memoryMB > 4096 {
-		fatal("memory-mb must be between 512 and 4096")
+	if *memoryMB < 1024 || *memoryMB > 4096 {
+		fatal("memory-mb must be between 1024 and 4096")
 	}
 	if *cpuSeconds < 1 || *cpuSeconds > 300 {
 		fatal("cpu-seconds must be between 1 and 300")
