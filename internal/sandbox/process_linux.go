@@ -14,9 +14,6 @@ func ProtectProcess() error {
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		return fmt.Errorf("disable process dumpability: %w", err)
 	}
-	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{}); err != nil {
-		return fmt.Errorf("disable core dumps: %w", err)
-	}
 	return nil
 }
 

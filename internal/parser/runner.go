@@ -124,7 +124,9 @@ func parserCommand(filename string, operation Operation, dpi int) []string {
 		}
 		return command
 	}
-	command := []string{pythonBin, "-B", docParserPath, string(operation), "--filename", filename}
+	// The equals form keeps leading-dash basenames from being interpreted as
+	// parser options while still passing the name without a shell.
+	command := []string{pythonBin, "-B", docParserPath, string(operation), "--filename=" + filename}
 	if operation == Render {
 		command = append(command, fmt.Sprintf("--dpi=%d", dpi))
 	}

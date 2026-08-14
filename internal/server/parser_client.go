@@ -38,6 +38,16 @@ type RenderResult struct {
 	PageCount int          `json:"page_count"`
 }
 
+type parserResponseError struct {
+	StatusCode        int
+	RetryAfterSeconds int
+	Message           string
+}
+
+func (responseError *parserResponseError) Error() string {
+	return fmt.Sprintf("parser returned %d: %s", responseError.StatusCode, responseError.Message)
+}
+
 var parserSocketPath = envOr("PARSER_SOCKET", "/run/docparser/parser.sock")
 
 var parserHTTPClient = &http.Client{
@@ -123,7 +133,15 @@ func parserPost(ctx context.Context, endpoint string, data []byte, filename stri
 		return nil, fmt.Errorf("parser response exceeds %d MiB", maxResponseBytes/(1024*1024))
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("parser returned %d: %s", response.StatusCode, truncate(string(body), 256))
+		retryAfter, _ := strconv.Atoi(response.Header.Get("Retry-After"))
+		if retryAfter < 1 || retryAfter > 60 {
+			retryAfter = 0
+		}
+		return nil, &parserResponseError{
+			StatusCode:        response.StatusCode,
+			RetryAfterSeconds: retryAfter,
+			Message:           truncate(string(body), 256),
+		}
 	}
 	return body, nil
 }
@@ -139,7 +157,8 @@ func parserHealthy() bool {
 	if err != nil {
 		return false
 	}
-	response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1024))
+	_ = response.Body.Close()
 	return response.StatusCode == http.StatusOK
 }
 

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -241,6 +242,14 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	docs, err := convertUploadedFiles(ctx, files, mode)
 	if err != nil {
 		slog.Error("convert failed", "err", err)
+		var responseError *parserResponseError
+		if errors.As(err, &responseError) && responseError.StatusCode == http.StatusTooManyRequests {
+			if responseError.RetryAfterSeconds > 0 {
+				w.Header().Set("Retry-After", strconv.Itoa(responseError.RetryAfterSeconds))
+			}
+			httpErr(w, http.StatusTooManyRequests, "parser busy")
+			return
+		}
 		httpErr(w, 502, "processing failed")
 		return
 	}

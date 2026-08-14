@@ -218,6 +218,9 @@ func parserFilters(processID uint32) []unix.SockFilter {
 	// PID could target a briefly dumpable sibling during exec startup, so never
 	// permit cross-process prlimit64.
 	filters = appendArgumentEqualRule(filters, unix.SYS_PRLIMIT64, 0, 0)
+	// The parser inherits SIGKILL-on-parent-death from the broker. Permit the
+	// runtime's post-exec prctl setup, but never allow it to clear that signal.
+	filters = appendArgumentNotEqualRule(filters, unix.SYS_PRCTL, 0, unix.PR_SET_PDEATHSIG)
 	// Dynamic loaders and document libraries may read files, but cannot acquire
 	// a writable descriptor.
 	filters = appendArgumentMaskRule(filters, unix.SYS_OPEN, 1, writeOpenFlags, false)
@@ -262,6 +265,17 @@ func appendArgumentEqualRule(filters []unix.SockFilter, syscallNumber uint32, ar
 		jump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, syscallNumber, 0, 4),
 		stmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, seccompDataArgsOffset+argument*8),
 		jump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, value, 0, 1),
+		stmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ALLOW),
+		stmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ERRNO|uint32(unix.EPERM)),
+		stmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, seccompDataNumberOffset),
+	)
+}
+
+func appendArgumentNotEqualRule(filters []unix.SockFilter, syscallNumber uint32, argument uint32, value uint32) []unix.SockFilter {
+	return append(filters,
+		jump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, syscallNumber, 0, 4),
+		stmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, seccompDataArgsOffset+argument*8),
+		jump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, value, 1, 0),
 		stmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ALLOW),
 		stmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ERRNO|uint32(unix.EPERM)),
 		stmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, seccompDataNumberOffset),

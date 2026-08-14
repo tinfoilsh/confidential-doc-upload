@@ -69,6 +69,12 @@ func runParserSandboxAssertions() {
 	if err := unix.Unlink("/tmp/does-not-exist"); !errors.Is(err, unix.EPERM) {
 		os.Exit(21)
 	}
+	if err := unix.Prctl(unix.PR_SET_PDEATHSIG, 0, 0, 0, 0); !errors.Is(err, unix.EPERM) {
+		os.Exit(22)
+	}
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		os.Exit(23)
+	}
 }
 
 func TestParserFiltersRejectEveryDeniedSyscall(t *testing.T) {

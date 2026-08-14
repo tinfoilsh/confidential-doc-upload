@@ -53,7 +53,7 @@ jobs:
       contents: read    # checkout + check the tag does not exist
       packages: write   # push the container image
     outputs:
-      digest: ${{ steps.build.outputs.digest }}
+      digest: ${{ steps.push.outputs.digest }}
 
     steps:
       - name: Checkout repository
@@ -90,7 +90,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}},value=${{ inputs.version }}
             type=sha,format=short
 
-      - name: Build and push Docker image
+      - name: Build the exact release image locally
         id: build
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         env:
@@ -98,22 +98,44 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          push: false
+          load: true
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            doc-upload-release-candidate:${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ inputs.version }}
 
-      - name: Scan the exact pushed image digest
-        env:
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+      - name: Scan the exact release image before publication
         run: |
           docker run --rm \
-            -v "$HOME/.docker:/root/.docker:ro" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
             aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
-            image --scanners vuln \
+            image --image-src docker --scanners vuln \
             --severity LOW,MEDIUM,HIGH,CRITICAL --exit-code 1 \
-            "ghcr.io/$GITHUB_REPOSITORY@$IMAGE_DIGEST"
+            "doc-upload-release-candidate:$GITHUB_SHA"
+
+      - name: Push the pre-scanned image without rebuilding
+        id: push
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while IFS= read -r image_tag; do
+            if [ -n "$image_tag" ]; then
+              docker push "$image_tag"
+            fi
+          done <<EOF
+          $IMAGE_TAGS
+          EOF
+          first_tag=$(printf '%s\n' "$IMAGE_TAGS" | sed -n '1p')
+          repo_digest=$(docker image inspect "$first_tag" --format '{{index .RepoDigests 0}}')
+          digest=${repo_digest##*@}
+          if [ -z "$digest" ]; then
+            echo "::error::Failed to resolve pushed image digest"
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
   prepare-release:
     needs: build

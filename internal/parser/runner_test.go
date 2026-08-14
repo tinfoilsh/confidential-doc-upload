@@ -28,8 +28,8 @@ func TestParserCommandSelectsOneParser(t *testing.T) {
 	if strings.Join(pdf, " ") != pdfParserBin+" --render --dpi=144" {
 		t.Fatalf("PDF command = %q", pdf)
 	}
-	document := parserCommand("random.docx", Extract, 0)
-	if len(document) != 6 || document[0] != pythonBin || document[2] != docParserPath || document[3] != string(Extract) {
+	document := parserCommand("-random.docx", Extract, 0)
+	if len(document) != 5 || document[0] != pythonBin || document[2] != docParserPath || document[3] != string(Extract) || document[4] != "--filename=-random.docx" {
 		t.Fatalf("document command = %q", document)
 	}
 }
