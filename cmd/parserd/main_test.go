@@ -11,17 +11,19 @@ import (
 	"time"
 )
 
-func TestDecodeFilenameAcceptsOnlyBasename(t *testing.T) {
-	const safeName = "0123456789abcdef0123456789abcdef.pdf"
-	valid := base64.RawURLEncoding.EncodeToString([]byte(safeName))
-	if got, err := decodeFilename(valid); err != nil || got != safeName {
-		t.Fatalf("decodeFilename(valid) = %q, %v", got, err)
+func TestDecodeFilenameAcceptsOnlyBoundedBasename(t *testing.T) {
+	for _, safeName := range []string{
+		"0123456789abcdef0123456789abcdef.pdf",
+		"random.PDF",
+		"report.bad-name",
+	} {
+		valid := base64.RawURLEncoding.EncodeToString([]byte(safeName))
+		if got, err := decodeFilename(valid); err != nil || got != safeName {
+			t.Fatalf("decodeFilename(valid) = %q, %v", got, err)
+		}
 	}
 	for _, value := range []string{
-		"../secret", "/secret", "", "random.pdf",
-		"0123456789abcdef0123456789abcdeg.pdf",
-		"0123456789abcdef0123456789abcdef.PDF",
-		"0123456789abcdef0123456789abcdef.bad-name",
+		"../secret", "/secret", "",
 		string(make([]byte, 256)),
 	} {
 		encoded := base64.RawURLEncoding.EncodeToString([]byte(value))

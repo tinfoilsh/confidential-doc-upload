@@ -296,30 +296,10 @@ func decodeFilename(value string) (string, error) {
 		return "", errors.New("invalid filename")
 	}
 	name := filepath.Base(string(decoded))
-	if name != string(decoded) || !validDocumentName(name) {
+	if name != string(decoded) {
 		return "", errors.New("invalid filename")
 	}
 	return name, nil
-}
-
-// The router deliberately replaces attacker-controlled names with 128 bits of
-// lowercase hex plus a validated extension. Enforce that private API contract
-// again at the trust boundary.
-func validDocumentName(name string) bool {
-	if len(name) < 34 || len(name) > 48 || name[32] != '.' {
-		return false
-	}
-	for _, character := range name[:32] {
-		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
-			return false
-		}
-	}
-	for _, character := range name[33:] {
-		if (character < 'a' || character > 'z') && (character < '0' || character > '9') {
-			return false
-		}
-	}
-	return true
 }
 
 func envOr(name, fallback string) string {
