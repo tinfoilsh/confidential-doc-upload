@@ -17,8 +17,10 @@ import (
 )
 
 var (
-	vlmModel = envOr("VLM_MODEL", "gemma4-31b")
-	vlmKey   = envOr("TINFOIL_API_KEY", "")
+	vlmModel          = envOr("VLM_MODEL", "gemma4-31b")
+	vlmKey            = envOr("TINFOIL_API_KEY", "")
+	vlmProxyURL       = envOr("TINFOIL_PROXY_URL", "https://inference.tinfoil.sh/v1/")
+	vlmAttestationURL = envOr("TINFOIL_ATTESTATION_URL", "https://atc.tinfoil.sh")
 
 	tinfoilVLM atomic.Pointer[tinfoil.Client]
 	// Tracks live VLM connectivity. Seeded true when the connection succeeds.
@@ -57,7 +59,7 @@ func maybeReinitClient() {
 	if unhealthySince.Load() == 0 {
 		return
 	}
-	client, err := tinfoil.NewClient(option.WithAPIKey(vlmKey))
+	client, err := newTinfoilClient()
 	if err != nil {
 		metricVLMReinits.WithLabelValues("error").Inc()
 		slog.Warn("tinfoil re-init failed", "err", err)
@@ -100,9 +102,7 @@ func initTinfoilClient() {
 		slog.Warn("no TINFOIL_API_KEY set, VLM calls will fail")
 		return
 	}
-	client, err := tinfoil.NewClient(
-		option.WithAPIKey(vlmKey),
-	)
+	client, err := newTinfoilClient()
 	if err != nil {
 		slog.Error("failed to create Tinfoil client", "err", err)
 		return
@@ -110,6 +110,18 @@ func initTinfoilClient() {
 	tinfoilVLM.Store(client)
 	setVLMHealth(true)
 	slog.Info("tinfoil VLM client initialized", "model", vlmModel)
+}
+
+func newTinfoilClient() (*tinfoil.Client, error) {
+	// Keep the router's network policy small and stable: attestation bundles
+	// come from one fixed origin and encrypted inference travels through one
+	// fixed proxy. The SDK still verifies the bundle locally and encrypts the
+	// request body end-to-end to the attested enclave selected by that bundle.
+	return tinfoil.NewClientWithOptions(
+		tinfoil.WithBaseURL(vlmProxyURL),
+		tinfoil.WithAttestationBundleURL(vlmAttestationURL),
+		tinfoil.WithOpenAIOptions(option.WithAPIKey(vlmKey)),
+	)
 }
 
 func vlmCall(ctx context.Context, kind, imageB64, prompt string, maxTokens int) (string, error) {

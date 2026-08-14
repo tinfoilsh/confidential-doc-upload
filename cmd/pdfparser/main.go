@@ -28,8 +28,13 @@ type parseOutput struct {
 }
 
 func main() {
-	if err := sandbox.RestrictNetwork(); err != nil {
-		fatal("install network sandbox: %v", err)
+	// Defense in depth: production invokes pdfparser through sandbox-exec, but
+	// direct executions must fail closed too.
+	if err := sandbox.ProtectProcess(); err != nil {
+		fatal("protect parser process: %v", err)
+	}
+	if err := sandbox.RestrictParser(); err != nil {
+		fatal("install parser sandbox: %v", err)
 	}
 
 	render := flag.Bool("render", false, "include page images as base64 PNG")

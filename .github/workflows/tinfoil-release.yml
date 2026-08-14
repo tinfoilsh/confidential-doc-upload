@@ -21,7 +21,45 @@ concurrency:
   group: tinfoil-container-release-${{ inputs.version }}
 
 jobs:
+  security:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build security-test environment
+        run: docker build --target go-builder -t doc-upload-security-builder .
+
+      - name: Test, race-check, vet, and scan reachable Go code
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src:ro" -w /src \
+            doc-upload-security-builder /bin/sh -c '
+              /usr/local/go/bin/go test ./... &&
+              /usr/local/go/bin/go test -race ./... &&
+              /usr/local/go/bin/go vet ./... &&
+              /usr/local/go/bin/go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+            '
+
+      - name: Build final image for package and OS scanning
+        run: docker build -t doc-upload-security-candidate .
+
+      - name: Scan final image vulnerabilities
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
+            image --image-src docker --scanners vuln \
+            --severity LOW,MEDIUM,HIGH,CRITICAL --exit-code 1 \
+            doc-upload-security-candidate
+
   build:
+    needs: security
     runs-on: ubuntu-latest
     permissions:
       contents: read    # checkout + check the tag does not exist

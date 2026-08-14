@@ -1,9 +1,11 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -13,24 +15,25 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/tinfoilsh/confidential-doc-upload/internal/sandbox"
 )
 
 var (
-	sidecarURL  = envOr("SIDECAR_URL", "http://localhost:5002")
 	listenAddr  = envOr("ROUTER_PORT", "5000")
-	maxFileMB   = envInt("MAX_FILE_SIZE_MB", 50)
-	maxFiles    = envInt("MAX_FILES", 10)
-	maxParts    = envInt("MAX_PARTS", 64)
-	maxParallel = envInt("MAX_PARALLEL", 32)
-
-	httpClient = &http.Client{
-		Timeout:   10 * time.Minute,
-		Transport: &http.Transport{MaxIdleConns: 128, MaxIdleConnsPerHost: 64, IdleConnTimeout: 90 * time.Second},
-	}
+	maxFileMB   = boundedEnvInt("MAX_FILE_SIZE_MB", 50, 1, 64)
+	maxFiles    = boundedEnvInt("MAX_FILES", 10, 1, 10)
+	maxParts    = boundedEnvInt("MAX_PARTS", 64, 1, 128)
+	maxParallel = boundedEnvInt("MAX_PARALLEL", 8, 1, 32)
+	maxActive   = boundedEnvInt("MAX_ACTIVE_REQUESTS", 4, 1, 32)
+	requestGate = make(chan struct{}, maxActive)
+	// Multi-file requests may use two workers, but all requests together can
+	// never exceed the pre-existing MAX_ACTIVE_REQUESTS work ceiling.
+	documentGate = make(chan struct{}, maxActive)
 
 	metricReqs     = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "router_requests_total"}, []string{"format", "mode"})
 	metricDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "router_duration_seconds", Buckets: prometheus.ExponentialBuckets(0.01, 2, 14)}, []string{"format", "mode"})
@@ -78,6 +81,11 @@ var (
 	}, []string{"result"}) // success | error
 )
 
+type uploadedFile struct {
+	name string
+	data []byte
+}
+
 func init() {
 	prometheus.MustRegister(metricReqs, metricDuration, metricActive, metricErrors,
 		metricPages, metricSize, metricDocType,
@@ -85,6 +93,10 @@ func init() {
 }
 
 func Main() {
+	if err := sandbox.ProtectProcess(); err != nil {
+		slog.Error("failed to protect router process", "err", err)
+		os.Exit(1)
+	}
 	initTinfoilClient()
 
 	mux := http.NewServeMux()
@@ -94,13 +106,16 @@ func Main() {
 
 	slog.Info("router starting",
 		"addr", ":"+listenAddr,
-		"sidecar", sidecarURL,
+		"parser_socket", parserSocketPath,
 		"vlm_model", vlmModel)
 	srv := &http.Server{
-		Addr:        ":" + listenAddr,
-		Handler:     mux,
-		ReadTimeout: 5 * time.Minute,
-		IdleTimeout: 120 * time.Second,
+		Addr:              ":" + listenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		WriteTimeout:      15 * time.Minute,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    32 * 1024,
 	}
 	if err := srv.ListenAndServe(); err != nil {
 		slog.Error("server failed", "err", err)
@@ -109,20 +124,37 @@ func Main() {
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-	sOK := checkHealth(sidecarURL + "/health")
+	pOK := parserHealthy()
 	vlmOK := vlmHealthy()
-	status, code := "ok", http.StatusOK
-	if !sOK || !vlmOK {
-		status, code = "degraded", http.StatusServiceUnavailable
-	}
+	status, code := healthStatus(pOK, vlmOK)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]any{
-		"status": status, "router": true, "sidecar": sOK, "vlm": vlmOK,
+		"status": status, "router": true, "parser": pOK, "vlm": vlmOK,
 	})
 }
 
+// VLM is an optional dependency for raw, images, and born-digital document
+// paths. Report it as degraded without failing core readiness; the private
+// parser is required for every supported conversion and remains fail-closed.
+func healthStatus(parserOK, vlmOK bool) (string, int) {
+	if !parserOK {
+		return "unavailable", http.StatusServiceUnavailable
+	}
+	if !vlmOK {
+		return "degraded", http.StatusOK
+	}
+	return "ok", http.StatusOK
+}
+
 func handleConvert(w http.ResponseWriter, r *http.Request) {
+	select {
+	case requestGate <- struct{}{}:
+		defer func() { <-requestGate }()
+	default:
+		httpErr(w, http.StatusTooManyRequests, "too many active requests")
+		return
+	}
 	metricActive.Inc()
 	defer metricActive.Dec()
 	t0 := time.Now()
@@ -145,10 +177,6 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reader := multipart.NewReader(r.Body, params["boundary"])
-	type uploadedFile struct {
-		name string
-		data []byte
-	}
 	var files []uploadedFile
 
 	for partCount := 0; ; {
@@ -167,6 +195,7 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if part.FormName() == "files" {
+			originalName := part.FileName()
 			if len(files) >= maxFiles {
 				part.Close()
 				httpErr(w, 400, "too many files")
@@ -182,7 +211,11 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 				httpErr(w, 413, "file too large")
 				return
 			}
-			name := randomName(part.FileName())
+			name, err := randomName(originalName)
+			if err != nil {
+				httpErr(w, http.StatusInternalServerError, "failed to create document identifier")
+				return
+			}
 			files = append(files, uploadedFile{name, data})
 		} else {
 			part.Close()
@@ -197,39 +230,23 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	w.Header().Set("Content-Type", "application/json")
 
-	if len(files) == 1 {
-		f := files[0]
-		result, err := convertFile(ctx, f.data, f.name, mode)
-		if err != nil {
-			slog.Error("convert failed", "err", err)
-			httpErr(w, 502, "processing failed")
-			return
-		}
+	docs, err := convertUploadedFiles(ctx, files, mode)
+	if err != nil {
+		slog.Error("convert failed", "err", err)
+		httpErr(w, 502, "processing failed")
+		return
+	}
+	metricReqs.WithLabelValues("pdf", mode).Inc()
+	metricDuration.WithLabelValues("pdf", mode).Observe(time.Since(t0).Seconds())
 
-		metricReqs.WithLabelValues("pdf", mode).Inc()
-		metricDuration.WithLabelValues("pdf", mode).Observe(time.Since(t0).Seconds())
-
+	if len(docs) == 1 {
 		json.NewEncoder(w).Encode(map[string]any{
-			"document":        result,
+			"document":        docs[0],
 			"status":          "success",
 			"processing_time": time.Since(t0).Seconds(),
 		})
 		return
 	}
-
-	var docs []ConvertResult
-	for i, f := range files {
-		result, err := convertFile(ctx, f.data, f.name, mode)
-		if err != nil {
-			slog.Error("convert failed", "file_index", i, "err", err)
-			httpErr(w, 502, "processing failed")
-			return
-		}
-		docs = append(docs, result)
-	}
-	metricReqs.WithLabelValues("pdf", mode).Inc()
-	metricDuration.WithLabelValues("pdf", mode).Observe(time.Since(t0).Seconds())
-
 	json.NewEncoder(w).Encode(map[string]any{
 		"documents":       docs,
 		"status":          "success",
@@ -237,26 +254,94 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// --- helpers ---
-
-func randomName(orig string) string {
-	var b [16]byte
-	rand.Read(b[:])
-	ext := filepath.Ext(orig)
-	if ext == "" {
-		ext = ".pdf"
-	}
-	return hex.EncodeToString(b[:]) + ext
+func convertUploadedFiles(ctx context.Context, files []uploadedFile, mode string) ([]ConvertResult, error) {
+	return convertUploadedFilesWith(ctx, files, mode, convertFile)
 }
 
-func checkHealth(url string) bool {
-	c := &http.Client{Timeout: 3 * time.Second}
-	r, err := c.Get(url)
-	if err != nil {
+type documentConverter func(context.Context, []byte, string, string) (ConvertResult, error)
+
+func convertUploadedFilesWith(ctx context.Context, files []uploadedFile, mode string, convert documentConverter) ([]ConvertResult, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results := make([]ConvertResult, len(files))
+	jobs := make(chan int, len(files))
+	for index := range files {
+		jobs <- index
+	}
+	close(jobs)
+
+	workers := min(2, len(files))
+	var wait sync.WaitGroup
+	var fail sync.Once
+	var firstErr error
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case index, ok := <-jobs:
+					if !ok {
+						return
+					}
+					select {
+					case documentGate <- struct{}{}:
+					case <-ctx.Done():
+						return
+					}
+					file := files[index]
+					result, err := convert(ctx, file.data, file.name, mode)
+					<-documentGate
+					if err != nil {
+						fail.Do(func() {
+							firstErr = fmt.Errorf("file %d: %w", index, err)
+							cancel()
+						})
+						return
+					}
+					results[index] = result
+				}
+			}
+		}()
+	}
+	wait.Wait()
+	if firstErr == nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return results, firstErr
+}
+
+// --- helpers ---
+
+func randomName(orig string) (string, error) {
+	return randomNameFrom(rand.Reader, orig)
+}
+
+func randomNameFrom(random io.Reader, orig string) (string, error) {
+	var b [16]byte
+	if _, err := io.ReadFull(random, b[:]); err != nil {
+		return "", fmt.Errorf("read document identifier entropy: %w", err)
+	}
+	ext := strings.ToLower(filepath.Ext(orig))
+	if !safeExtension(ext) {
+		ext = ".bin"
+	}
+	return hex.EncodeToString(b[:]) + ext, nil
+}
+
+func safeExtension(extension string) bool {
+	if len(extension) < 2 || len(extension) > 16 || extension[0] != '.' {
 		return false
 	}
-	r.Body.Close()
-	return r.StatusCode == 200
+	for _, character := range extension[1:] {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func httpErr(w http.ResponseWriter, code int, msg string, attrs ...any) {
@@ -281,4 +366,12 @@ func envInt(k string, d int) int {
 		}
 	}
 	return d
+}
+
+func boundedEnvInt(name string, fallback, minimum, maximum int) int {
+	value := envInt(name, fallback)
+	if value < minimum || value > maximum {
+		return fallback
+	}
+	return value
 }
