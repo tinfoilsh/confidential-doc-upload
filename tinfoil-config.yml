@@ -22,6 +22,7 @@ containers:
       - MAX_FILES: "2"
       - MAX_PARALLEL: "8"
       - MAX_ACTIVE_REQUESTS: "4"
+      - MAX_QUEUED_REQUESTS: "16"
     secrets:
       - TINFOIL_API_KEY
     healthcheck:

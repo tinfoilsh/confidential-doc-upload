@@ -47,7 +47,7 @@ from reading or executing parser code even though both roles share one image.
 | **Hard resource limits** | Every parser gets kernel limits for address space (1536 MiB), CPU time (120s), open files (64), output (256 MiB), stderr (1 MiB), and zero-sized files/core dumps/locked memory/message queues. The parser container also has memory, CPU, and PID cgroup caps. |
 | **Authenticated private API** | The router gets connect-only group access to the parser socket. The broker additionally authenticates every connection with kernel `SO_PEERCRED` and accepts only the fixed router/parser UIDs. |
 | **Immutable runtime** | The router runs as 65533:65532 and the parser as 65532:65532, with all capabilities dropped, `no-new-privileges`, no IPC namespace sharing, read-only root filesystems, and no parser tmpfs. |
-| **Bounded admission** | Upload size, file count, multipart parts, active requests, total document workers, per-request workers, VLM fan-out, parser response size, and parser wall time are bounded. Parser slots are acquired before request bodies are buffered. |
+| **Bounded admission** | Upload size, file count, multipart parts, body-unread waiting requests, active requests, total document workers, per-request workers, VLM fan-out, parser response size, and parser wall time are bounded. Only four requests may enter the body-buffering path; sixteen more may wait. Parser slots are acquired before parser request bodies are buffered. |
 | **Pinned inputs** | Base images use digests, MuPDF uses a pinned version and verified SHA-256, Python packages are exact-version/hash locked with binary-only installs, and Go modules are verified before reproducible, path-trimmed builds. Build-only `pip` is removed from the runtime image. |
 
 The per-PDF invariant is precise: initial extraction uses one fresh `pdfparser`
@@ -70,6 +70,9 @@ admitted pass still creates a new process, enters a new Landlock domain, reads
 one document from stdin, emits one bounded response, and exits. There is no
 parser process pool and no process reuse across documents. A global router gate
 preserves the configured aggregate work ceiling across concurrent requests.
+An independent sixteen-request queue absorbs short bursts for up to 30 seconds
+without admitting more than four requests into the memory-heavy processing
+path.
 
 The two-worker limit is intentional: it recovers parallel throughput without
 allowing attacker-controlled parsing to expand to the VM's full CPU and memory.
@@ -183,7 +186,8 @@ unavailable optional VLM is reported as `"status":"degraded"` with `200`, so
 
 ### `GET /metrics`
 
-Prometheus metrics: `router_requests_total`, `router_duration_seconds`, `router_active_requests`, `router_errors_total`.
+Prometheus metrics include `router_requests_total`, `router_duration_seconds`,
+`router_active_requests`, `router_queued_requests`, and `router_errors_total`.
 
 ## PDF extraction
 
@@ -221,7 +225,8 @@ The PDF parser produces markdown with:
 | `MAX_FILE_SIZE_MB` | `50` | Per-file limit, bounded to 1–64 MiB |
 | `MAX_FILES` | `2` | Files per request, bounded to 1–2; `images` mode accepts one file |
 | `MAX_PARTS` | `64` | Multipart parts, bounded to 1–128 |
-| `MAX_ACTIVE_REQUESTS` | `4` | Admitted requests, bounded to 1–4 to cap buffered upload memory |
+| `MAX_ACTIVE_REQUESTS` | `4` | Requests actively processing buffered documents, bounded to 1–4 |
+| `MAX_QUEUED_REQUESTS` | `16` | Additional body-unread requests allowed to wait up to 30 seconds, bounded to 1–64 |
 | `MAX_PARALLEL` | `8` | Service-wide concurrent VLM calls, bounded to 1–32 |
 | `PARSER_TIMEOUT_SECONDS` | `120` | Parser wall/CPU limit, bounded to 1–300 seconds |
 | `PARSER_MEMORY_LIMIT_MB` | `1536` | Parser address-space limit, bounded to 1024–4096 MiB |

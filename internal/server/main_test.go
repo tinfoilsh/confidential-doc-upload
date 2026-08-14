@@ -34,6 +34,76 @@ func TestRequestFileLimitBoundsImageResults(t *testing.T) {
 	}
 }
 
+func TestRequestQueueWaitsWithoutExpandingActiveLimit(t *testing.T) {
+	queue := make(chan struct{}, 1)
+	active := make(chan struct{}, 1)
+	active <- struct{}{} // Simulate one memory-heavy request already running.
+
+	type admission struct {
+		release func()
+		err     error
+	}
+	result := make(chan admission, 1)
+	go func() {
+		release, err := acquireRequestSlot(context.Background(), queue, active, time.Second)
+		result <- admission{release: release, err: err}
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for len(queue) != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(queue) != 1 {
+		t.Fatal("request did not enter waiting queue")
+	}
+	if _, err := acquireRequestSlot(context.Background(), queue, active, time.Second); !errors.Is(err, errRequestQueueFull) {
+		t.Fatalf("second waiter error = %v, want queue full", err)
+	}
+
+	<-active
+	admitted := <-result
+	if admitted.err != nil {
+		t.Fatal(admitted.err)
+	}
+	if len(queue) != 0 || len(active) != 1 {
+		t.Fatalf("queue=%d active=%d after admission, want 0 and 1", len(queue), len(active))
+	}
+	admitted.release()
+	if len(active) != 0 {
+		t.Fatal("active slot was not released")
+	}
+}
+
+func TestRequestQueueTimeoutReleasesWaiter(t *testing.T) {
+	queue := make(chan struct{}, 1)
+	active := make(chan struct{}, 1)
+	active <- struct{}{}
+
+	_, err := acquireRequestSlot(context.Background(), queue, active, time.Millisecond)
+	if !errors.Is(err, errRequestQueueTimeout) {
+		t.Fatalf("error = %v, want queue timeout", err)
+	}
+	if len(queue) != 0 {
+		t.Fatal("timed-out request retained its queue slot")
+	}
+}
+
+func TestRequestQueueCancellationReleasesWaiter(t *testing.T) {
+	queue := make(chan struct{}, 1)
+	active := make(chan struct{}, 1)
+	active <- struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := acquireRequestSlot(ctx, queue, active, time.Second)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want canceled", err)
+	}
+	if len(queue) != 0 {
+		t.Fatal("canceled request retained its queue slot")
+	}
+}
+
 func TestRandomNameFailsClosedWithoutEntropy(t *testing.T) {
 	if _, err := randomNameFrom(strings.NewReader("short"), "report.pdf"); err == nil {
 		t.Fatal("randomNameFrom() accepted insufficient entropy")

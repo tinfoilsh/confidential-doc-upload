@@ -24,12 +24,19 @@ import (
 	"github.com/tinfoilsh/confidential-doc-upload/internal/sandbox"
 )
 
+const requestQueueTimeout = 30 * time.Second
+
 var (
 	listenAddr  = envOr("ROUTER_PORT", "5000")
 	maxFileMB   = boundedEnvInt("MAX_FILE_SIZE_MB", 50, 1, 64)
 	maxFiles    = boundedEnvInt("MAX_FILES", 2, 1, 2)
 	maxParts    = boundedEnvInt("MAX_PARTS", 64, 1, 128)
 	maxParallel = boundedEnvInt("MAX_PARALLEL", 8, 1, 32)
+	// Waiting requests have not read or retained their bodies yet, so a bounded
+	// queue absorbs bursts without expanding the adversarial document-memory
+	// envelope enforced by requestGate.
+	maxQueued    = boundedEnvInt("MAX_QUEUED_REQUESTS", 16, 1, 64)
+	requestQueue = make(chan struct{}, maxQueued)
 	// Combined with the two-file batch limit, the 256 MiB parser-output ceiling,
 	// and the one-file image-mode limit, four requests keep retained results and
 	// buffered uploads below the router's 6 GiB cgroup limit. Higher admission
@@ -47,6 +54,10 @@ var (
 	metricDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "router_duration_seconds", Buckets: prometheus.ExponentialBuckets(0.01, 2, 14)}, []string{"format", "mode"})
 	metricActive   = prometheus.NewGauge(prometheus.GaugeOpts{Name: "router_active_requests"})
 	metricErrors   = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "router_errors_total"}, []string{"type"})
+	metricQueued   = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "router_queued_requests",
+		Help: "Requests waiting for an active processing slot",
+	}, func() float64 { return float64(len(requestQueue)) })
 
 	// Coarse-grained buckets to prevent document fingerprinting via exact values
 	metricPages = prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -95,7 +106,7 @@ type uploadedFile struct {
 }
 
 func init() {
-	prometheus.MustRegister(metricReqs, metricDuration, metricActive, metricErrors,
+	prometheus.MustRegister(metricReqs, metricDuration, metricActive, metricErrors, metricQueued,
 		metricPages, metricSize, metricDocType,
 		metricVLMCalls, metricVLMDuration, metricVLMHealthy, metricVLMReinits)
 }
@@ -156,13 +167,16 @@ func healthStatus(parserOK, vlmOK bool) (string, int) {
 }
 
 func handleConvert(w http.ResponseWriter, r *http.Request) {
-	select {
-	case requestGate <- struct{}{}:
-		defer func() { <-requestGate }()
-	default:
-		httpErr(w, http.StatusTooManyRequests, "too many active requests")
+	release, err := acquireRequestSlot(r.Context(), requestQueue, requestGate, requestQueueTimeout)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
+		w.Header().Set("Retry-After", "1")
+		httpErr(w, http.StatusTooManyRequests, "request queue full")
 		return
 	}
+	defer release()
 	metricActive.Inc()
 	defer metricActive.Dec()
 	t0 := time.Now()
@@ -264,6 +278,36 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 		"status":          "success",
 		"processing_time": time.Since(t0).Seconds(),
 	})
+}
+
+var (
+	errRequestQueueFull    = errors.New("request queue full")
+	errRequestQueueTimeout = errors.New("request queue wait timed out")
+)
+
+// acquireRequestSlot admits a lightweight waiter before allowing it to enter
+// the memory-heavy request path. The queue token is released as soon as an
+// active slot is obtained, so the limits compose as maxActive + maxQueued.
+func acquireRequestSlot(ctx context.Context, queue, active chan struct{}, timeout time.Duration) (func(), error) {
+	select {
+	case queue <- struct{}{}:
+	default:
+		return nil, errRequestQueueFull
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case active <- struct{}{}:
+		<-queue
+		return func() { <-active }, nil
+	case <-ctx.Done():
+		<-queue
+		return nil, ctx.Err()
+	case <-timer.C:
+		<-queue
+		return nil, errRequestQueueTimeout
+	}
 }
 
 func writeParserBackpressure(w http.ResponseWriter, err error) bool {
