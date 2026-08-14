@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -119,6 +121,28 @@ func TestHealthStatusRequiresParserButNotOptionalVLM(t *testing.T) {
 		if status != test.status || code != test.code {
 			t.Fatalf("healthStatus(%v, %v) = %q, %d", test.parser, test.vlm, status, code)
 		}
+	}
+}
+
+func TestWriteParserBackpressurePreservesPublicContract(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	err := fmt.Errorf("file 0: extract: %w", &parserResponseError{
+		StatusCode:        http.StatusTooManyRequests,
+		RetryAfterSeconds: 5,
+		Message:           "parser busy",
+	})
+
+	if !writeParserBackpressure(recorder, err) {
+		t.Fatal("writeParserBackpressure() rejected wrapped parser backpressure")
+	}
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "5" {
+		t.Fatalf("Retry-After = %q, want 5", got)
+	}
+	if !strings.Contains(recorder.Body.String(), `"error":"parser busy"`) {
+		t.Fatalf("body = %q", recorder.Body.String())
 	}
 }
 

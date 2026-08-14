@@ -242,12 +242,7 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	docs, err := convertUploadedFiles(ctx, files, mode)
 	if err != nil {
 		slog.Error("convert failed", "err", err)
-		var responseError *parserResponseError
-		if errors.As(err, &responseError) && responseError.StatusCode == http.StatusTooManyRequests {
-			if responseError.RetryAfterSeconds > 0 {
-				w.Header().Set("Retry-After", strconv.Itoa(responseError.RetryAfterSeconds))
-			}
-			httpErr(w, http.StatusTooManyRequests, "parser busy")
+		if writeParserBackpressure(w, err) {
 			return
 		}
 		httpErr(w, 502, "processing failed")
@@ -269,6 +264,18 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 		"status":          "success",
 		"processing_time": time.Since(t0).Seconds(),
 	})
+}
+
+func writeParserBackpressure(w http.ResponseWriter, err error) bool {
+	var responseError *parserResponseError
+	if !errors.As(err, &responseError) || responseError.StatusCode != http.StatusTooManyRequests {
+		return false
+	}
+	if responseError.RetryAfterSeconds > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(responseError.RetryAfterSeconds))
+	}
+	httpErr(w, http.StatusTooManyRequests, "parser busy")
+	return true
 }
 
 func convertUploadedFiles(ctx context.Context, files []uploadedFile, mode string) ([]ConvertResult, error) {
