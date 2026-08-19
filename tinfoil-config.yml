@@ -4,7 +4,7 @@ memory: 16384
 
 containers:
   - name: "doc-upload"
-    image: "ghcr.io/tinfoilsh/confidential-doc-upload@sha256:0000000000000000000000000000000000000000000000000000000000000000" # placeholder - populated during release
+    image: "ghcr.io/tinfoilsh/confidential-doc-upload@sha256:75d0413bafd9a295f3f5a1439d3d88541206f91077055828925a225c5723709d" # v0.0.33
     user: "65533:65532"
     restart: always
     networks: [web]
@@ -32,7 +32,7 @@ containers:
       start_period: 30s
 
   - name: "doc-parser"
-    image: "ghcr.io/tinfoilsh/confidential-doc-upload@sha256:0000000000000000000000000000000000000000000000000000000000000000" # placeholder - populated during release
+    image: "ghcr.io/tinfoilsh/confidential-doc-upload@sha256:75d0413bafd9a295f3f5a1439d3d88541206f91077055828925a225c5723709d" # v0.0.33
     user: "65532:65532"
     command: ["/usr/local/bin/parserd"]
     restart: always
