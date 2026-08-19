@@ -21,13 +21,39 @@ concurrency:
   group: tinfoil-container-release-${{ inputs.version }}
 
 jobs:
+  security:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build security-test environment
+        run: docker build --target go-builder -t doc-upload-security-builder .
+
+      - name: Test, race-check, vet, and scan reachable Go code
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src:ro" -w /src \
+            doc-upload-security-builder /bin/sh -c '
+              /usr/local/go/bin/go test ./... &&
+              /usr/local/go/bin/go test -race ./... &&
+              /usr/local/go/bin/go vet ./... &&
+              /usr/local/go/bin/go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+            '
+
   build:
+    needs: security
     runs-on: ubuntu-latest
     permissions:
       contents: read    # checkout + check the tag does not exist
       packages: write   # push the container image
     outputs:
-      digest: ${{ steps.build.outputs.digest }}
+      digest: ${{ steps.push.outputs.digest }}
 
     steps:
       - name: Checkout repository
@@ -64,7 +90,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}},value=${{ inputs.version }}
             type=sha,format=short
 
-      - name: Build and push Docker image
+      - name: Build the exact release image locally
         id: build
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         env:
@@ -72,11 +98,44 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          push: false
+          load: true
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            doc-upload-release-candidate:${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ inputs.version }}
+
+      - name: Scan the exact release image before publication
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
+            image --image-src docker --scanners vuln \
+            --severity LOW,MEDIUM,HIGH,CRITICAL --exit-code 1 \
+            "doc-upload-release-candidate:$GITHUB_SHA"
+
+      - name: Push the pre-scanned image without rebuilding
+        id: push
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while IFS= read -r image_tag; do
+            if [ -n "$image_tag" ]; then
+              docker push "$image_tag"
+            fi
+          done <<EOF
+          $IMAGE_TAGS
+          EOF
+          first_tag=$(printf '%s\n' "$IMAGE_TAGS" | sed -n '1p')
+          repo_digest=$(docker image inspect "$first_tag" --format '{{index .RepoDigests 0}}')
+          digest=${repo_digest##*@}
+          if [ -z "$digest" ]; then
+            echo "::error::Failed to resolve pushed image digest"
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
   prepare-release:
     needs: build

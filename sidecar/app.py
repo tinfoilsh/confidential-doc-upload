@@ -1,31 +1,36 @@
-"""Document processing sidecar for non-PDF formats.
+"""Single-document parser for non-PDF formats.
 
 PDF extraction is handled by the Go pdfparser binary.
-This sidecar handles: DOCX, PPTX, HTML, XLSX, CSV, Markdown, images, text.
+This process handles one DOCX, PPTX, HTML, XLSX, CSV, Markdown, image, or text
+document from stdin and exits. sandbox-exec installs its kernel restrictions
+before the Python interpreter starts.
 """
 
+import argparse
+import base64
+import ctypes
 import csv
 import io
-import time
+import json
+import os
+import sys
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile
 
-app = FastAPI()
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+def _protect_process() -> None:
+    """Prevent same-UID processes from reading this parser through procfs."""
+    pr_set_dumpable = 4
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(pr_set_dumpable, 0, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
 
 
 # ── Extract ───────────────────────────────────────────────────────────────
 
-@app.post("/extract")
-async def extract(file: UploadFile = File(...)):
-    t0 = time.time()
-    data = await file.read()
-    ext = _detect_ext(file.filename)
+
+def extract(data: bytes, filename: str) -> dict:
+    ext = _detect_ext(filename)
 
     if ext in (".docx",):
         result = _extract_docx(data)
@@ -46,8 +51,23 @@ async def extract(file: UploadFile = File(...)):
     else:
         result = {"format": "unknown", "md_content": "", "error": f"Unsupported format: {ext}"}
 
-    result["elapsed_s"] = time.time() - t0
     return result
+
+
+def render(data: bytes, dpi: int) -> dict:
+    """Normalize one uploaded image into the parser API's PNG page format."""
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as image:
+        image.seek(0)
+        if image.mode not in ("RGB", "RGBA"):
+            image = image.convert("RGBA" if "transparency" in image.info else "RGB")
+        output = io.BytesIO()
+        image.save(output, format="PNG", optimize=True, dpi=(dpi, dpi))
+    return {
+        "pages": [{"page": 1, "image": base64.b64encode(output.getvalue()).decode("ascii")}],
+        "page_count": 1,
+    }
 
 
 # ── DOCX ──────────────────────────────────────────────────────────────────
@@ -411,3 +431,33 @@ def _detect_ext(filename: str | None) -> str:
     if not filename:
         return ""
     return Path(filename).suffix.lower()
+
+
+def main() -> None:
+    _protect_process()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("operation", choices=("extract", "render"))
+    parser.add_argument("--filename", required=True)
+    parser.add_argument("--dpi", type=int, default=100)
+    args = parser.parse_args()
+
+    # The router enforces a smaller configured upload limit. This independent
+    # bound protects direct or future callers of the parser broker.
+    data = sys.stdin.buffer.read(64 * 1024 * 1024 + 1)
+    if not data:
+        raise SystemExit("empty input")
+    if len(data) > 64 * 1024 * 1024:
+        raise SystemExit("input exceeds 64 MiB")
+
+    if args.operation == "extract":
+        result = extract(data, args.filename)
+    else:
+        if not 20 <= args.dpi <= 600:
+            raise SystemExit("dpi must be between 20 and 600")
+        result = render(data, args.dpi)
+    json.dump(result, sys.stdout, separators=(",", ":"))
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()

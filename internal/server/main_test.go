@@ -1,0 +1,233 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestSafeExtension(t *testing.T) {
+	for _, extension := range []string{".pdf", ".docx", ".xlsx", ".jpeg"} {
+		if !safeExtension(extension) {
+			t.Errorf("safeExtension(%q) = false", extension)
+		}
+	}
+	for _, extension := range []string{"", ".", ".../../secret", ".PDF", ".reallylongextension", ".doc-x"} {
+		if safeExtension(extension) {
+			t.Errorf("safeExtension(%q) = true", extension)
+		}
+	}
+}
+
+func TestRequestFileLimitBoundsImageResults(t *testing.T) {
+	if got := requestFileLimit("images"); got != 1 {
+		t.Fatalf("requestFileLimit(images) = %d, want 1", got)
+	}
+	if got := requestFileLimit("raw"); got != maxFiles {
+		t.Fatalf("requestFileLimit(raw) = %d, want %d", got, maxFiles)
+	}
+}
+
+func TestRequestQueueWaitsWithoutExpandingActiveLimit(t *testing.T) {
+	queue := make(chan struct{}, 1)
+	active := make(chan struct{}, 1)
+	active <- struct{}{} // Simulate one memory-heavy request already running.
+
+	type admission struct {
+		release func()
+		err     error
+	}
+	result := make(chan admission, 1)
+	go func() {
+		release, err := acquireRequestSlot(context.Background(), queue, active, time.Second)
+		result <- admission{release: release, err: err}
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for len(queue) != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(queue) != 1 {
+		t.Fatal("request did not enter waiting queue")
+	}
+	if _, err := acquireRequestSlot(context.Background(), queue, active, time.Second); !errors.Is(err, errRequestQueueFull) {
+		t.Fatalf("second waiter error = %v, want queue full", err)
+	}
+
+	<-active
+	admitted := <-result
+	if admitted.err != nil {
+		t.Fatal(admitted.err)
+	}
+	if len(queue) != 0 || len(active) != 1 {
+		t.Fatalf("queue=%d active=%d after admission, want 0 and 1", len(queue), len(active))
+	}
+	admitted.release()
+	if len(active) != 0 {
+		t.Fatal("active slot was not released")
+	}
+}
+
+func TestRequestQueueTimeoutReleasesWaiter(t *testing.T) {
+	queue := make(chan struct{}, 1)
+	active := make(chan struct{}, 1)
+	active <- struct{}{}
+
+	_, err := acquireRequestSlot(context.Background(), queue, active, time.Millisecond)
+	if !errors.Is(err, errRequestQueueTimeout) {
+		t.Fatalf("error = %v, want queue timeout", err)
+	}
+	if len(queue) != 0 {
+		t.Fatal("timed-out request retained its queue slot")
+	}
+}
+
+func TestRequestQueueCancellationReleasesWaiter(t *testing.T) {
+	queue := make(chan struct{}, 1)
+	active := make(chan struct{}, 1)
+	active <- struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := acquireRequestSlot(ctx, queue, active, time.Second)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want canceled", err)
+	}
+	if len(queue) != 0 {
+		t.Fatal("canceled request retained its queue slot")
+	}
+}
+
+func TestRandomNameFailsClosedWithoutEntropy(t *testing.T) {
+	if _, err := randomNameFrom(strings.NewReader("short"), "report.pdf"); err == nil {
+		t.Fatal("randomNameFrom() accepted insufficient entropy")
+	}
+
+	name, err := randomNameFrom(strings.NewReader("0123456789abcdef"), "../REPORT.PDF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "30313233343536373839616263646566.pdf" {
+		t.Fatalf("randomNameFrom() = %q", name)
+	}
+
+	name, err = randomNameFrom(strings.NewReader("0123456789abcdef"), "extensionless")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "30313233343536373839616263646566.pdf" {
+		t.Fatalf("extensionless randomNameFrom() = %q", name)
+	}
+
+	name, err = randomNameFrom(strings.NewReader("0123456789abcdef"), "report.doc-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "30313233343536373839616263646566.bin" {
+		t.Fatalf("unsafe-extension randomNameFrom() = %q", name)
+	}
+
+	failing := errorReader{err: errors.New("entropy source failed")}
+	if _, err := randomNameFrom(failing, "report.pdf"); err == nil {
+		t.Fatal("randomNameFrom() ignored entropy source failure")
+	}
+}
+
+type errorReader struct{ err error }
+
+func (reader errorReader) Read([]byte) (int, error) { return 0, reader.err }
+
+func TestConvertUploadedFilesIsOrderedAndBounded(t *testing.T) {
+	files := []uploadedFile{{name: "0"}, {name: "1"}, {name: "2"}, {name: "3"}}
+	var active atomic.Int32
+	var maximum atomic.Int32
+	convert := func(_ context.Context, _ []byte, filename, _ string) (ConvertResult, error) {
+		current := active.Add(1)
+		for {
+			previous := maximum.Load()
+			if current <= previous || maximum.CompareAndSwap(previous, current) {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+		active.Add(-1)
+		return ConvertResult{MDContent: filename}, nil
+	}
+
+	results, err := convertUploadedFilesWith(context.Background(), files, "raw", convert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if maximum.Load() != 2 {
+		t.Fatalf("maximum concurrency = %d, want 2", maximum.Load())
+	}
+	for index, result := range results {
+		if result.MDContent != files[index].name {
+			t.Fatalf("result %d = %q, want %q", index, result.MDContent, files[index].name)
+		}
+	}
+}
+
+func TestHealthStatusRequiresParserButNotOptionalVLM(t *testing.T) {
+	tests := []struct {
+		parser bool
+		vlm    bool
+		status string
+		code   int
+	}{
+		{true, true, "ok", http.StatusOK},
+		{true, false, "degraded", http.StatusOK},
+		{false, true, "unavailable", http.StatusServiceUnavailable},
+		{false, false, "unavailable", http.StatusServiceUnavailable},
+	}
+	for _, test := range tests {
+		status, code := healthStatus(test.parser, test.vlm)
+		if status != test.status || code != test.code {
+			t.Fatalf("healthStatus(%v, %v) = %q, %d", test.parser, test.vlm, status, code)
+		}
+	}
+}
+
+func TestWriteParserBackpressurePreservesPublicContract(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	err := fmt.Errorf("file 0: extract: %w", &parserResponseError{
+		StatusCode:        http.StatusTooManyRequests,
+		RetryAfterSeconds: 5,
+		Message:           "parser busy",
+	})
+
+	if !writeParserBackpressure(recorder, err) {
+		t.Fatal("writeParserBackpressure() rejected wrapped parser backpressure")
+	}
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "5" {
+		t.Fatalf("Retry-After = %q, want 5", got)
+	}
+	if !strings.Contains(recorder.Body.String(), `"error":"parser busy"`) {
+		t.Fatalf("body = %q", recorder.Body.String())
+	}
+}
+
+func TestNormalizeExtractResultUsesMarkdownFallback(t *testing.T) {
+	result := ExtractResult{Pages: []ExtractPage{
+		{Text: "pdf text", MDContent: "markdown should not replace text"},
+		{MDContent: "spreadsheet markdown"},
+	}}
+
+	normalizeExtractResult(&result)
+
+	if result.Pages[0].Text != "pdf text" {
+		t.Fatalf("existing text was replaced: %q", result.Pages[0].Text)
+	}
+	if result.Pages[1].Text != "spreadsheet markdown" {
+		t.Fatalf("markdown fallback missing: %q", result.Pages[1].Text)
+	}
+}

@@ -30,7 +30,11 @@ var (
 	reinitMu       sync.Mutex
 )
 
-const vlmReinitAfter = 5 * time.Minute
+const (
+	vlmReinitAfter    = 5 * time.Minute
+	vlmProxyURL       = "https://inference.tinfoil.sh/v1/"
+	vlmAttestationURL = "https://atc.tinfoil.sh"
+)
 
 func vlmHealthy() bool { return vlmHealth.Load() }
 
@@ -57,7 +61,7 @@ func maybeReinitClient() {
 	if unhealthySince.Load() == 0 {
 		return
 	}
-	client, err := tinfoil.NewClient(option.WithAPIKey(vlmKey))
+	client, err := newTinfoilClient()
 	if err != nil {
 		metricVLMReinits.WithLabelValues("error").Inc()
 		slog.Warn("tinfoil re-init failed", "err", err)
@@ -100,9 +104,7 @@ func initTinfoilClient() {
 		slog.Warn("no TINFOIL_API_KEY set, VLM calls will fail")
 		return
 	}
-	client, err := tinfoil.NewClient(
-		option.WithAPIKey(vlmKey),
-	)
+	client, err := newTinfoilClient()
 	if err != nil {
 		slog.Error("failed to create Tinfoil client", "err", err)
 		return
@@ -110,6 +112,18 @@ func initTinfoilClient() {
 	tinfoilVLM.Store(client)
 	setVLMHealth(true)
 	slog.Info("tinfoil VLM client initialized", "model", vlmModel)
+}
+
+func newTinfoilClient() (*tinfoil.Client, error) {
+	// Keep the router's network policy small and stable: attestation bundles
+	// come from one fixed origin and encrypted inference travels through one
+	// fixed proxy. The SDK still verifies the bundle locally and encrypts the
+	// request body end-to-end to the attested enclave selected by that bundle.
+	return tinfoil.NewClientWithOptions(
+		tinfoil.WithBaseURL(vlmProxyURL),
+		tinfoil.WithAttestationBundleURL(vlmAttestationURL),
+		tinfoil.WithOpenAIOptions(option.WithAPIKey(vlmKey)),
+	)
 }
 
 func vlmCall(ctx context.Context, kind, imageB64, prompt string, maxTokens int) (string, error) {
@@ -250,15 +264,13 @@ func vlmParallelMixed(ctx context.Context, work map[int]vlmWorkItem) map[int]vlm
 	results := make(map[int]vlmResult)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, maxParallel)
-
 	for idx, item := range work {
 		wg.Add(1)
 		go func(pageIdx int, w vlmWorkItem) {
 			defer wg.Done()
 			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
+			case vlmGate <- struct{}{}:
+				defer func() { <-vlmGate }()
 			case <-ctx.Done():
 				mu.Lock()
 				results[pageIdx] = vlmResult{err: ctx.Err()}
