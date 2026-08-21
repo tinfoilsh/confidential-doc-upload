@@ -60,7 +60,10 @@ networks:
     egress: allowlist
     allow:
       - atc.tinfoil.sh
+      # Keep this set in sync with ATC's eligible router inventory. Unknown
+      # routers fail closed at the cvmimage network boundary.
       - inference.tinfoil.sh
+      - router.inf6.tinfoil.sh
 
 shim:
   upstream-port: 5000
