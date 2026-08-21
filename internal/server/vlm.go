@@ -32,7 +32,6 @@ var (
 
 const (
 	vlmReinitAfter    = 5 * time.Minute
-	vlmProxyURL       = "https://inference.tinfoil.sh/v1/"
 	vlmAttestationURL = "https://atc.tinfoil.sh"
 )
 
@@ -115,12 +114,10 @@ func initTinfoilClient() {
 }
 
 func newTinfoilClient() (*tinfoil.Client, error) {
-	// Keep the router's network policy small and stable: attestation bundles
-	// come from one fixed origin and encrypted inference travels through one
-	// fixed proxy. The SDK still verifies the bundle locally and encrypts the
-	// request body end-to-end to the attested enclave selected by that bundle.
+	// ATC selects a router and supplies its bundle. The SDK verifies the bundle
+	// locally, then sends encrypted inference directly to that same verified
+	// domain so the request endpoint and HPKE key cannot diverge.
 	return tinfoil.NewClientWithOptions(
-		tinfoil.WithBaseURL(vlmProxyURL),
 		tinfoil.WithAttestationBundleURL(vlmAttestationURL),
 		tinfoil.WithOpenAIOptions(option.WithAPIKey(vlmKey)),
 	)

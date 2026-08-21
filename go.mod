@@ -5,7 +5,7 @@ go 1.26.6
 require (
 	github.com/openai/openai-go/v3 v3.42.0
 	github.com/prometheus/client_golang v1.23.2
-	github.com/tinfoilsh/tinfoil-go v0.15.2
+	github.com/tinfoilsh/tinfoil-go v0.15.3
 	golang.org/x/sys v0.47.0
 )
 
@@ -45,7 +45,6 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/google/certificate-transparency-go v1.3.3 // indirect
 	github.com/google/go-containerregistry v0.21.7 // indirect
-	github.com/google/go-sev-guest v0.15.0 // indirect
 	github.com/google/go-tdx-guest v0.3.1 // indirect
 	github.com/google/logger v1.1.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -74,6 +73,7 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/tinfoilsh/encrypted-http-body-protocol v0.3.2 // indirect
+	github.com/tinfoilsh/go-sev-guest v0.0.0-20260818055935-bec7bdb637fd // indirect
 	github.com/transparency-dev/formats v0.1.1 // indirect
 	github.com/transparency-dev/merkle v0.0.2 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
