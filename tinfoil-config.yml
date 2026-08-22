@@ -60,6 +60,9 @@ networks:
     egress: allowlist
     allow:
       - atc.tinfoil.sh
+      # tinfoil-go initializes its Sigstore verifier from the signed TUF trust
+      # root before it verifies the ATC-provided attestation bundle.
+      - tuf-repo-cdn.sigstore.dev
       # Keep this set in sync with ATC's eligible router inventory. Unknown
       # routers fail closed at the cvmimage network boundary.
       - inference.tinfoil.sh
