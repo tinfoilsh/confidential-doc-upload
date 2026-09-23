@@ -37,7 +37,7 @@ docker run -d --name doc-upload -p 5000:5000 \
 curl -F "files=@test.pdf" http://localhost:5000/v1/convert/file?mode=raw
 ```
 
-Production applies the equivalent topology and limits from `tinfoil-config.yml`. Tunables are read from the environment in [`cmd/router/`](cmd/router/) and [`cmd/parserd/`](cmd/parserd/).
+Production applies the equivalent topology and limits from `tinfoil-config.yml`. Tunables are read from the environment in [`internal/server/`](internal/server/) and [`cmd/parserd/`](cmd/parserd/).
 
 ## Architecture Overview
 
