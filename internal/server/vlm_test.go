@@ -2,9 +2,19 @@ package server
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/tinfoilsh/confidential-doc-upload/internal/processing"
+	"github.com/tinfoilsh/tinfoil-go"
 )
 
 func TestVLMParallelMixedUsesServiceWideGate(t *testing.T) {
@@ -59,5 +69,62 @@ func TestVLMParallelMixedUsesServiceWideGate(t *testing.T) {
 	}
 	if got := maximum.Load(); got != 2 {
 		t.Fatalf("maximum VLM concurrency = %d, want 2", got)
+	}
+}
+
+func TestVLMErrorsDoNotExposeUpstreamDetails(t *testing.T) {
+	originalClient := tinfoilVLM.Load()
+	originalHealth := vlmHealth.Load()
+	originalSince := unhealthySince.Load()
+	t.Cleanup(func() {
+		tinfoilVLM.Store(originalClient)
+		vlmHealth.Store(originalHealth)
+		unhealthySince.Store(originalSince)
+	})
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		err    error
+		want   processing.Code
+	}{
+		{"client rejection", 400, `{"error":{"message":"` + privateErrorFixture + `"}}`, nil, processing.OCRFailed},
+		{"auth", 401, privateErrorFixture, nil, processing.OCRUnavailable},
+		{"permission", 403, privateErrorFixture, nil, processing.OCRUnavailable},
+		{"server", 500, privateErrorFixture, nil, processing.OCRUnavailable},
+		{"empty choices", 200, `{"choices":[]}`, nil, processing.OCRFailed},
+		{"transport", 0, "", errors.New(privateErrorFixture), processing.OCRUnavailable},
+		{"timeout", 0, "", context.DeadlineExceeded, processing.OCRTimeout},
+		{"canceled", 0, "", context.Canceled, processing.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			unhealthySince.Store(0)
+			client := openai.NewClient(option.WithAPIKey("test-key"), option.WithMaxRetries(0),
+				option.WithHTTPClient(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					if tc.err != nil {
+						return nil, tc.err
+					}
+					return &http.Response{StatusCode: tc.status, Request: request,
+						Header: http.Header{"Content-Type": {"application/json"}},
+						Body:   io.NopCloser(strings.NewReader(tc.body))}, nil
+				})}))
+			tinfoilVLM.Store(&tinfoil.Client{Client: &client})
+			_, err := vlmCall(context.Background(), "ocr", "test-image", "test-prompt", 1)
+			if err == nil || processing.CodeOf(err) != tc.want {
+				t.Fatalf("VLM error = %v, want %s", err, tc.want)
+			}
+			if strings.Contains(err.Error(), privateErrorFixture) {
+				t.Fatal("upstream error text exposed")
+			}
+			recorder := httptest.NewRecorder()
+			writeProcessingError(recorder, http.StatusBadGateway, processing.CodeOf(err))
+			assertProcessingResponse(t, recorder, http.StatusBadGateway, tc.want)
+		})
+	}
+	unhealthySince.Store(0)
+	tinfoilVLM.Store(nil)
+	_, err := vlmCall(context.Background(), "ocr", "test-image", "test-prompt", 1)
+	if processing.CodeOf(err) != processing.OCRUnavailable {
+		t.Fatalf("uninitialized client: %v", err)
 	}
 }

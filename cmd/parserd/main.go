@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-doc-upload/internal/parser"
+	"github.com/tinfoilsh/confidential-doc-upload/internal/processing"
 	"github.com/tinfoilsh/confidential-doc-upload/internal/sandbox"
 	"golang.org/x/sys/unix"
 )
@@ -140,14 +141,21 @@ func handleParse(operation parser.Operation, parserSlots chan struct{}) http.Han
 
 		result, err := parser.Run(request.Context(), data, filename, operation, dpi)
 		if err != nil {
-			slog.Warn("document parser failed", "operation", operation, "err", err)
-			http.Error(w, "parser failed", http.StatusUnprocessableEntity)
+			writeParserError(w, operation, err)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		_, _ = w.Write(result)
 	}
+}
+
+func writeParserError(w http.ResponseWriter, operation parser.Operation, err error) {
+	code := processing.CodeOf(err)
+	slog.Warn("document parser failed", "operation", operation, "code", code)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnprocessableEntity)
+	_ = json.NewEncoder(w).Encode(map[string]string{"code": string(code)})
 }
 
 func acquireParserSlot(ctx context.Context, slots chan struct{}, timeout time.Duration) error {

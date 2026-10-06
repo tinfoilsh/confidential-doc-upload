@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/tinfoilsh/confidential-doc-upload/internal/processing"
 )
 
 const (
@@ -36,7 +38,7 @@ const (
 
 func Run(ctx context.Context, data []byte, filename string, operation Operation, dpi int) ([]byte, error) {
 	if len(data) == 0 {
-		return nil, errors.New("empty document")
+		return nil, processing.Wrap(errors.New("empty document"), processing.Empty)
 	}
 	if operation != Extract && operation != Render {
 		return nil, fmt.Errorf("unsupported parser operation %q", operation)
@@ -70,13 +72,17 @@ func Run(ctx context.Context, data []byte, filename string, operation Operation,
 	}
 	cmd.WaitDelay = 2 * time.Second
 
-	stdout := newLimitedBuffer(maxOutputMB * 1024 * 1024)
+	return runParserProcess(ctx, cmd, maxOutputMB*1024*1024)
+}
+
+func runParserProcess(ctx context.Context, cmd *exec.Cmd, maxOutputBytes int) ([]byte, error) {
+	stdout := newLimitedBuffer(maxOutputBytes)
 	stderr := newLimitedBuffer(maxStderrBytes)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start parser: %w", err)
+		return nil, processing.Wrap(err, processing.ParserUnavailable)
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -89,7 +95,7 @@ func Run(ctx context.Context, data []byte, filename string, operation Operation,
 		killProcessGroup(cmd)
 		runErr = <-done
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return nil, fmt.Errorf("parser timeout after %ds", timeoutSeconds)
+			return nil, processing.Wrap(ctx.Err(), processing.ParserTimeout)
 		}
 		return nil, ctx.Err()
 	case <-stdout.exceeded:
@@ -108,10 +114,13 @@ func Run(ctx context.Context, data []byte, filename string, operation Operation,
 	}
 
 	if limitName != "" {
-		return nil, fmt.Errorf("parser %s exceeded hard output limit", limitName)
+		return nil, processing.Wrap(errors.New("parser output limit exceeded"), processing.ParserOutputLimit)
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return nil, processing.Wrap(ctx.Err(), processing.ParserTimeout)
 	}
 	if runErr != nil {
-		return nil, fmt.Errorf("parser failed: %w", runErr)
+		return nil, processing.Wrap(runErr, processing.ParserFailed)
 	}
 	return append([]byte(nil), stdout.Bytes()...), nil
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +13,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/tinfoilsh/confidential-doc-upload/internal/processing"
 )
 
 type ExtractPage struct {
@@ -41,12 +44,13 @@ type RenderResult struct {
 type parserResponseError struct {
 	StatusCode        int
 	RetryAfterSeconds int
-	Message           string
 }
 
 func (responseError *parserResponseError) Error() string {
-	return fmt.Sprintf("parser returned %d: %s", responseError.StatusCode, responseError.Message)
+	return fmt.Sprintf("parser returned %d", responseError.StatusCode)
 }
+
+const maxParserErrorBytes = 4096
 
 var parserSocketPath = envOr("PARSER_SOCKET", "/run/docparser/parser.sock")
 
@@ -77,11 +81,11 @@ func parserTransport(maxConnections int) *http.Transport {
 func sidecarExtract(ctx context.Context, data []byte, filename string) (ExtractResult, error) {
 	body, err := parserPost(ctx, "/v1/extract", data, filename)
 	if err != nil {
-		return ExtractResult{}, err
+		return ExtractResult{}, processing.AtStage(err, processing.ExtractionFailed)
 	}
 	var result ExtractResult
 	if err := json.Unmarshal(body, &result); err != nil {
-		return ExtractResult{}, fmt.Errorf("decode parser extraction: %w", err)
+		return ExtractResult{}, processing.Wrap(err, processing.ParserInvalidResponse)
 	}
 	normalizeExtractResult(&result)
 	return result, nil
@@ -101,11 +105,11 @@ func normalizeExtractResult(result *ExtractResult) {
 func sidecarRender(ctx context.Context, data []byte, filename string, dpi int) (RenderResult, error) {
 	body, err := parserPost(ctx, "/v1/render?dpi="+url.QueryEscape(strconv.Itoa(dpi)), data, filename)
 	if err != nil {
-		return RenderResult{}, err
+		return RenderResult{}, processing.AtStage(err, processing.RenderFailed)
 	}
 	var result RenderResult
 	if err := json.Unmarshal(body, &result); err != nil {
-		return RenderResult{}, fmt.Errorf("decode parser render: %w", err)
+		return RenderResult{}, processing.Wrap(err, processing.ParserInvalidResponse)
 	}
 	return result, nil
 }
@@ -120,28 +124,55 @@ func parserPost(ctx context.Context, endpoint string, data []byte, filename stri
 
 	response, err := parserHTTPClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("parser request: %w", err)
+		code := processing.ParserUnavailable
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = processing.ParserTimeout
+		}
+		return nil, processing.Wrap(err, code)
 	}
 	defer response.Body.Close()
 
+	retryAfter, _ := strconv.Atoi(response.Header.Get("Retry-After"))
+	if retryAfter < 1 || retryAfter > 60 {
+		retryAfter = 0
+	}
+	responseError := &parserResponseError{
+		StatusCode:        response.StatusCode,
+		RetryAfterSeconds: retryAfter,
+	}
+	if response.StatusCode == http.StatusTooManyRequests {
+		return nil, responseError
+	}
 	maxResponseBytes := int64(boundedEnvInt("PARSER_MAX_OUTPUT_MB", 256, 1, 256)) * 1024 * 1024
+	if response.StatusCode != http.StatusOK {
+		maxResponseBytes = maxParserErrorBytes
+	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read parser response: %w", err)
+		code := processing.ParserInvalidResponse
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = processing.ParserTimeout
+		}
+		return nil, processing.Wrap(err, code)
 	}
 	if int64(len(body)) > maxResponseBytes {
-		return nil, fmt.Errorf("parser response exceeds %d MiB", maxResponseBytes/(1024*1024))
+		return nil, processing.Wrap(errors.New("parser response too large"), processing.ParserOutputLimit)
 	}
 	if response.StatusCode != http.StatusOK {
-		retryAfter, _ := strconv.Atoi(response.Header.Get("Retry-After"))
-		if retryAfter < 1 || retryAfter > 60 {
-			retryAfter = 0
+		if response.StatusCode >= http.StatusInternalServerError {
+			return nil, processing.Wrap(responseError, processing.ParserUnavailable)
 		}
-		return nil, &parserResponseError{
-			StatusCode:        response.StatusCode,
-			RetryAfterSeconds: retryAfter,
-			Message:           truncate(string(body), 256),
+		var payload struct {
+			Code processing.Code `json:"code"`
 		}
+		if response.StatusCode == http.StatusUnprocessableEntity && json.Unmarshal(body, &payload) == nil {
+			switch payload.Code {
+			case processing.Empty, processing.ParserFailed, processing.ParserTimeout,
+				processing.ParserOutputLimit, processing.ParserUnavailable, processing.Canceled:
+				return nil, processing.Wrap(responseError, payload.Code)
+			}
+		}
+		return nil, responseError
 	}
 	return body, nil
 }
@@ -160,11 +191,4 @@ func parserHealthy() bool {
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1024))
 	_ = response.Body.Close()
 	return response.StatusCode == http.StatusOK
-}
-
-func truncate(value string, maximum int) string {
-	if len(value) <= maximum {
-		return value
-	}
-	return value[:maximum]
 }

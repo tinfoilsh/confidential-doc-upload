@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	"github.com/tinfoilsh/confidential-doc-upload/internal/processing"
 	"github.com/tinfoilsh/tinfoil-go"
 )
 
@@ -128,7 +128,7 @@ func vlmCall(ctx context.Context, kind, imageB64, prompt string, maxTokens int) 
 	client := tinfoilVLM.Load()
 	if client == nil {
 		metricVLMCalls.WithLabelValues(kind, "transport").Inc()
-		return "", fmt.Errorf("VLM client not initialized (missing TINFOIL_API_KEY?)")
+		return "", processing.Wrap(errors.New("VLM client not initialized"), processing.OCRUnavailable)
 	}
 	t0 := time.Now()
 	resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
@@ -170,12 +170,21 @@ func vlmCall(ctx context.Context, kind, imageB64, prompt string, maxTokens int) 
 		case "transport", "auth", "server":
 			setVLMHealth(false)
 		}
-		return "", fmt.Errorf("vlm: %w", err)
+		code := processing.OCRFailed
+		switch result {
+		case "transport", "auth", "server":
+			code = processing.OCRUnavailable
+		case "canceled":
+			if errors.Is(err, context.DeadlineExceeded) {
+				code = processing.OCRTimeout
+			}
+		}
+		return "", processing.Wrap(err, code)
 	}
 	setVLMHealth(true)
 	if len(resp.Choices) == 0 {
 		metricVLMCalls.WithLabelValues(kind, "empty").Inc()
-		return "", fmt.Errorf("vlm: empty response")
+		return "", processing.Wrap(errors.New("vlm: empty response"), processing.OCRFailed)
 	}
 	metricVLMCalls.WithLabelValues(kind, "success").Inc()
 
