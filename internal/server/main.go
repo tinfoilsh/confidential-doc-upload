@@ -21,6 +21,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/tinfoilsh/confidential-doc-upload/internal/processing"
 	"github.com/tinfoilsh/confidential-doc-upload/internal/sandbox"
 )
 
@@ -255,11 +256,10 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 
 	docs, err := convertUploadedFiles(ctx, files, mode)
 	if err != nil {
-		slog.Error("convert failed", "err", err)
 		if writeParserBackpressure(w, err) {
 			return
 		}
-		httpErr(w, 502, "processing failed")
+		writeProcessingError(w, http.StatusBadGateway, processing.CodeOf(err))
 		return
 	}
 	metricReqs.WithLabelValues("pdf", mode).Inc()
@@ -318,7 +318,7 @@ func writeParserBackpressure(w http.ResponseWriter, err error) bool {
 	if responseError.RetryAfterSeconds > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(responseError.RetryAfterSeconds))
 	}
-	httpErr(w, http.StatusTooManyRequests, "parser busy")
+	writeProcessingError(w, http.StatusTooManyRequests, processing.ParserBusy)
 	return true
 }
 

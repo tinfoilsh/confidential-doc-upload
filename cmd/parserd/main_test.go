@@ -1,14 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/tinfoilsh/confidential-doc-upload/internal/parser"
+	"github.com/tinfoilsh/confidential-doc-upload/internal/processing"
 )
 
 func TestDecodeFilenameAcceptsOnlyBoundedBasename(t *testing.T) {
@@ -30,6 +39,39 @@ func TestDecodeFilenameAcceptsOnlyBoundedBasename(t *testing.T) {
 		if _, err := decodeFilename(encoded); err == nil {
 			t.Fatalf("decodeFilename(%q) unexpectedly succeeded", value)
 		}
+	}
+}
+
+func TestParserErrorResponseAndLogsExcludeCauses(t *testing.T) {
+	const private = "private@example.test /secret/customer.pdf secret-token"
+	originalLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(originalLogger) })
+	for _, code := range []processing.Code{processing.Empty, processing.ParserFailed,
+		processing.ParserTimeout, processing.ParserOutputLimit, processing.ParserUnavailable, processing.Code(private)} {
+		var logs bytes.Buffer
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+		recorder := httptest.NewRecorder()
+		writeParserError(recorder, parser.Extract, fmt.Errorf("%s: %w", private, processing.Wrap(errors.New(private), code)))
+		if recorder.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("broker status changed: %d", recorder.Code)
+		}
+		if strings.Contains(logs.String()+recorder.Body.String(), private) {
+			t.Fatal("private parser cause escaped")
+		}
+		want := fmt.Sprintf("{\"code\":%q}\n", processing.Normalize(code))
+		if recorder.Body.String() != want {
+			t.Fatalf("broker body = %q, want %q", recorder.Body.String(), want)
+		}
+	}
+}
+
+func TestParserHandlerClassifiesEmptyDocument(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/extract", strings.NewReader(""))
+	request.Header.Set("X-Document-Name", base64.RawURLEncoding.EncodeToString([]byte("fixture.pdf")))
+	recorder := httptest.NewRecorder()
+	handleParse(parser.Extract, make(chan struct{}, 1))(recorder, request)
+	if recorder.Code != http.StatusUnprocessableEntity || recorder.Body.String() != "{\"code\":\"document_empty\"}\n" {
+		t.Fatalf("empty document response: %d %s", recorder.Code, recorder.Body.String())
 	}
 }
 

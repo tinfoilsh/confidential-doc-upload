@@ -7,6 +7,8 @@ import (
 	"math/bits"
 	"strings"
 	"time"
+
+	"github.com/tinfoilsh/confidential-doc-upload/internal/processing"
 )
 
 // nextPow2 rounds n up to the nearest power of 2.
@@ -75,7 +77,7 @@ func convertImage(ctx context.Context, data []byte, filename string, mode string
 	} else {
 		md, err := vlmFullPageOCR(ctx, img)
 		if err != nil {
-			return ConvertResult{}, fmt.Errorf("vlm image: %w", err)
+			return ConvertResult{}, processing.AtStage(err, processing.OCRFailed)
 		}
 		result.MDContent = md
 	}
@@ -201,7 +203,7 @@ func convertPDFVLM(ctx context.Context, data []byte, filename string, nPages int
 		parts[i-1] = res.text
 	}
 	if len(failed) > 0 {
-		return ConvertResult{}, fmt.Errorf("vlm OCR failed for %d/%d pages %v: %w", len(failed), nPages, failed, firstErr)
+		return ConvertResult{}, processing.AtStage(firstErr, processing.OCRFailed)
 	}
 
 	slog.Info("processed", "file", filename, "pages", nPages,
@@ -248,7 +250,7 @@ func convertPDFText(ctx context.Context, data []byte, filename string, nPages in
 				textPages[idx] = res.text
 			}
 			if len(failed) > 0 {
-				return ConvertResult{}, fmt.Errorf("vlm OCR failed for %d scanned page(s) %v: %w", len(failed), failed, firstErr)
+				return ConvertResult{}, processing.AtStage(firstErr, processing.OCRFailed)
 			}
 		}
 	}
@@ -299,7 +301,7 @@ func convertPDFVision(ctx context.Context, data []byte, filename string, nPages 
 	for idx, res := range vlmResults {
 		work := allVLMWork[idx]
 		if res.err != nil {
-			slog.Warn("vlm failed", "page", idx, "kind", work.kind, "err", res.err)
+			slog.Warn("vlm failed", "kind", work.kind, "code", processing.CodeOf(res.err))
 			if work.kind == "ocr" {
 				ocrFailed = append(ocrFailed, idx)
 				if firstOCRErr == nil {
@@ -318,7 +320,7 @@ func convertPDFVision(ctx context.Context, data []byte, filename string, nPages 
 		}
 	}
 	if len(ocrFailed) > 0 {
-		return ConvertResult{}, fmt.Errorf("vlm OCR failed for %d scanned page(s) %v: %w", len(ocrFailed), ocrFailed, firstOCRErr)
+		return ConvertResult{}, processing.AtStage(firstOCRErr, processing.OCRFailed)
 	}
 
 	var parts []string

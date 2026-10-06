@@ -199,7 +199,6 @@ func TestWriteParserBackpressurePreservesPublicContract(t *testing.T) {
 	err := fmt.Errorf("file 0: extract: %w", &parserResponseError{
 		StatusCode:        http.StatusTooManyRequests,
 		RetryAfterSeconds: 5,
-		Message:           "parser busy",
 	})
 
 	if !writeParserBackpressure(recorder, err) {
