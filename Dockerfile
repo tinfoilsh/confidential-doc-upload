@@ -40,6 +40,9 @@ RUN CGO_ENABLED=1 go build -mod=readonly -trimpath -buildvcs=false -o /app/bin/p
 # Stage 3: Runtime. The same immutable image runs either the secret-bearing
 # router or the networkless parser broker, selected by the deployment command.
 FROM python:3.12.14-alpine@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097130d7a4478111
+# CVE-2026-85091: the base image ships zlib 1.3.2-r0. Drop this once the
+# pinned python image includes zlib >= 1.3.2-r1.
+RUN apk add --no-cache --upgrade zlib=1.3.2-r1
 RUN addgroup -S -g 65532 app && \
     adduser -S -D -H -u 65532 -G app app && \
     install -d -o app -g app -m 0750 /run/docparser
