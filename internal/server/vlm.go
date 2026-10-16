@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -123,6 +125,14 @@ func newTinfoilClient() (*tinfoil.Client, error) {
 	)
 }
 
+func randomCacheSecret() string {
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(secret)
+}
+
 func vlmCall(ctx context.Context, kind, imageB64, prompt string, maxTokens int) (string, error) {
 	maybeReinitClient()
 	client := tinfoilVLM.Load()
@@ -131,6 +141,8 @@ func vlmCall(ctx context.Context, kind, imageB64, prompt string, maxTokens int) 
 		return "", processing.Wrap(errors.New("VLM client not initialized"), processing.OCRUnavailable)
 	}
 	t0 := time.Now()
+	// A fresh cache secret per request: every doc-upload user shares this one
+	// client and API key, so a shared prompt-cache namespace would create a timing oracle.
 	resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 		Model: vlmModel,
 		Messages: []openai.ChatCompletionMessageParamUnion{
@@ -143,7 +155,7 @@ func vlmCall(ctx context.Context, kind, imageB64, prompt string, maxTokens int) 
 		},
 		MaxTokens:        openai.Int(int64(maxTokens)),
 		FrequencyPenalty: openai.Float(0.3),
-	})
+	}, option.WithJSONSet("user_cache_secret", randomCacheSecret()))
 	metricVLMDuration.WithLabelValues(kind).Observe(time.Since(t0).Seconds())
 	if err != nil {
 		// Classify once: feeds both the prom counter and the health flip.
