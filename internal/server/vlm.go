@@ -125,12 +125,10 @@ func newTinfoilClient() (*tinfoil.Client, error) {
 	)
 }
 
-// randomCacheSecret returns a fresh 256-bit hex secret for one request's
-// prompt-cache namespace.
 func randomCacheSecret() string {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
-		panic(err) // crypto/rand never fails on a healthy system
+		panic(err)
 	}
 	return hex.EncodeToString(secret)
 }
@@ -144,10 +142,7 @@ func vlmCall(ctx context.Context, kind, imageB64, prompt string, maxTokens int) 
 	}
 	t0 := time.Now()
 	// A fresh cache secret per request: every doc-upload user shares this one
-	// client and API key, so a shared prompt-cache namespace would let one
-	// user probe (by timing) whether another recently converted the same
-	// page. Conversions are one-shot — cross-request cache reuse buys
-	// nothing — so a random per-request secret closes the oracle for free.
+	// client and API key, so a shared prompt-cache namespace would create a timing oracle.
 	resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 		Model: vlmModel,
 		Messages: []openai.ChatCompletionMessageParamUnion{
