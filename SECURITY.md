@@ -28,9 +28,9 @@ render process for that document. No parser process handles two documents or
 two passes, and at most two parsers overlap.
 
 Every release runs the Go tests, race detector, `go vet`, and `govulncheck`,
-and fails on any Trivy finding in the exact image it publishes. MuPDF is
-statically linked, so image scanners do not see it; its pinned version and
-checksum are in the [Dockerfile](Dockerfile).
+and fails on any Trivy vulnerability rated low or higher in the exact image it
+publishes. MuPDF is statically linked, so image scanners do not see it; its
+pinned version and checksum are in the [Dockerfile](Dockerfile).
 
 ## Threat-model limits
 
