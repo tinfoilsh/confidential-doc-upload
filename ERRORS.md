@@ -23,9 +23,8 @@ generic one on file inputs.
 | `document_processing_canceled` | Processing was canceled. |
 | `document_processing_failed` | Unclassified failure; no exception text is exposed. |
 
-The parser broker's internal `document_parser_failed` code is reported to
-callers as an extraction or render failure. Unknown codes become
-`document_processing_failed`.
+The parser broker's internal `document_parser_failed` code and any unknown
+broker code are reported to callers as an extraction or render failure.
 
 Error responses, failure logs, and the `router_document_processing_errors_total`
 metric never contain filenames, document text, page indexes, parser stderr,
