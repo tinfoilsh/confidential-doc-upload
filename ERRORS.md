@@ -1,15 +1,11 @@
 # Document processing errors
 
-Conversion failures return a fixed message and a stable code. Responses keep the
-legacy `error` string and include flat OpenAI-compatible `object`, `message`,
-`type`, `code`, and `param` fields. The model router normalizes this into its
-nested `error` object without losing the code or message on `/v1/convert/file`.
-Its internal file-input conversion path preserves the code but intentionally
-replaces server-error messages with its generic document-processing message.
-
-Existing status behavior is preserved: conversion failures return 502; parser
-backpressure returns 429 with the bounded `Retry-After` value. Request-validation
-errors and successful conversion responses are unchanged.
+Conversion failures return 502 with a fixed message and one of the stable codes
+below; parser backpressure returns 429 with a `Retry-After` header. The body
+keeps the legacy `error` string and adds flat OpenAI-compatible `object`,
+`message`, `type`, `code`, and `param` fields. The model router nests these in
+its `error` object and keeps the code, but replaces server-error messages with a
+generic one on file inputs.
 
 | Code | Meaning |
 | --- | --- |
@@ -27,18 +23,10 @@ errors and successful conversion responses are unchanged.
 | `document_processing_canceled` | Processing was canceled. |
 | `document_processing_failed` | Unclassified failure; no exception text is exposed. |
 
-The private parser broker also uses `document_parser_failed` for a child-process
-failure. The document service translates that into extraction or rendering
-context. A process exit alone does not prove malformed input, memory exhaustion,
-or a sandbox violation, so the API does not claim one of those causes.
+The parser broker's internal `document_parser_failed` code is reported to
+callers as an extraction or render failure. Unknown codes become
+`document_processing_failed`.
 
-`router_document_processing_errors_total{code="..."}` counts conversion failures
-by the same closed code set. Existing `router_errors_total{type="502"}` and
-`{type="429"}` counters remain available. Neither the new metric nor processing
-failure logs contain filenames, document text, page indexes, parser stderr,
-upstream response bodies, or raw exception messages. Unknown broker codes are
-discarded rather than reflected. No request IDs or document hashes are added.
-
-Deploy both the parser broker and document service from the same release to get
-timeout and output-limit classifications. A new service talking to an old broker
-still returns safe extraction/rendering categories for its plain-text errors.
+Error responses, failure logs, and the `router_document_processing_errors_total`
+metric never contain filenames, document text, page indexes, parser stderr,
+upstream response bodies, or raw exception messages.
