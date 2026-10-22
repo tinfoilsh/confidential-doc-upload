@@ -1,6 +1,6 @@
 module github.com/tinfoilsh/confidential-doc-upload
 
-go 1.26.6
+go 1.27.3
 
 require (
 	github.com/openai/openai-go/v3 v3.42.0
