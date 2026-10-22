@@ -48,7 +48,11 @@ RUN addgroup -S -g 65532 app && \
     install -d -o app -g app -m 0750 /run/docparser
 
 COPY sidecar/requirements.lock /tmp/requirements.lock
+# The parser imports each format's library only when a file of that format
+# arrives, so a missing package would otherwise pass health checks and fail
+# uploads instead of the build.
 RUN python -m pip install --no-cache-dir --only-binary=:all: --require-hashes -r /tmp/requirements.lock && \
+	python -B -c "import bs4, docx, openpyxl, PIL, pptx" && \
 	python -m pip uninstall --yes pip && \
     rm /tmp/requirements.lock
 
