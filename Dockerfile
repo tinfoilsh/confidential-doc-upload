@@ -16,7 +16,7 @@ RUN cd /tmp/mupdf-${MUPDF_VERSION}-source && \
     make HAVE_X11=no HAVE_GLUT=no HAVE_CURL=no build=release prefix=/usr/local install
 
 # Stage 2: Build Go binaries (router + parser linked against MuPDF)
-FROM golang:1.26.9-alpine@sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade AS go-builder
+FROM golang:1.27.3-alpine@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS go-builder
 
 RUN apk add --no-cache gcc musl-dev
 
