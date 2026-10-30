@@ -117,10 +117,11 @@ func initTinfoilClient() {
 
 func newTinfoilClient() (*tinfoil.Client, error) {
 	// ATC selects a router and supplies its bundle. The SDK verifies the bundle
-	// locally, then sends encrypted inference directly to that same verified
-	// domain so the request endpoint and HPKE key cannot diverge.
+	// locally, then pins TLS to that same verified domain's attested key, so
+	// headers and status codes are protected along with every body.
 	return tinfoil.NewClientWithOptions(
 		tinfoil.WithAttestationBundleURL(vlmAttestationURL),
+		tinfoil.WithTransport(tinfoil.TransportTLS),
 		tinfoil.WithOpenAIOptions(option.WithAPIKey(vlmKey)),
 	)
 }
