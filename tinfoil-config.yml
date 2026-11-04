@@ -70,6 +70,7 @@ networks:
 
 shim:
   upstream-port: 5000
+  drain_connections: true
   authenticated: true
   authenticated-endpoints:
     - /v1/convert/file
