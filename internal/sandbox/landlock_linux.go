@@ -90,11 +90,11 @@ func restrictFilesystem(rules []filesystemRule) error {
 		handled |= unix.LANDLOCK_ACCESS_FS_IOCTL_DEV
 	}
 
-	attributes := unix.LandlockRulesetAttr{Access_fs: handled}
+	attributes := unix.LandlockRulesetAttr{Handled_access_fs: handled}
 	ruleset, _, errno := unix.Syscall(
 		unix.SYS_LANDLOCK_CREATE_RULESET,
 		uintptr(unsafe.Pointer(&attributes)),
-		unsafe.Sizeof(attributes.Access_fs),
+		unsafe.Sizeof(attributes.Handled_access_fs),
 		0,
 	)
 	if errno != 0 {
