@@ -108,7 +108,7 @@ func TestVLMErrorsDoNotExposeUpstreamDetails(t *testing.T) {
 						Header: http.Header{"Content-Type": {"application/json"}},
 						Body:   io.NopCloser(strings.NewReader(tc.body))}, nil
 				})}))
-			tinfoilVLM.Store(&tinfoil.Client{Client: &client})
+			tinfoilVLM.Store(&tinfoil.RouterOpenAIClient{Client: &client})
 			_, err := vlmCall(context.Background(), "ocr", "test-image", "test-prompt", 1)
 			if err == nil || processing.CodeOf(err) != tc.want {
 				t.Fatalf("VLM error = %v, want %s", err, tc.want)

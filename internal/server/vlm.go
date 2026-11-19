@@ -22,7 +22,7 @@ var (
 	vlmModel = envOr("VLM_MODEL", "gemma4-31b")
 	vlmKey   = envOr("TINFOIL_API_KEY", "")
 
-	tinfoilVLM atomic.Pointer[tinfoil.Client]
+	tinfoilVLM atomic.Pointer[tinfoil.RouterOpenAIClient]
 	// Tracks live VLM connectivity. Seeded true when the connection succeeds.
 	vlmHealth atomic.Bool
 	// unhealthySince (unix-nanos) is set when health flips from true→false,
@@ -32,10 +32,7 @@ var (
 	reinitMu       sync.Mutex
 )
 
-const (
-	vlmReinitAfter    = 5 * time.Minute
-	vlmAttestationURL = "https://atc.tinfoil.sh"
-)
+const vlmReinitAfter = 5 * time.Minute
 
 func vlmHealthy() bool { return vlmHealth.Load() }
 
@@ -74,7 +71,7 @@ func maybeReinitClient() {
 	}
 	tinfoilVLM.Store(client)
 	metricVLMReinits.WithLabelValues("success").Inc()
-	slog.Info("tinfoil client re-initialized", "enclave", client.Enclave())
+	slog.Info("tinfoil client re-initialized", "enclave", client.HTTPClient().Enclave())
 }
 
 const vlmOCRPrompt = "Convert this page to markdown. Do not miss any text and only output the bare markdown!"
@@ -115,14 +112,13 @@ func initTinfoilClient() {
 	slog.Info("tinfoil VLM client initialized", "model", vlmModel)
 }
 
-func newTinfoilClient() (*tinfoil.Client, error) {
-	// ATC selects a router and supplies its bundle. The SDK verifies the bundle
-	// locally, then pins TLS to that same verified domain's attested key, so
-	// headers and status codes are protected along with every body.
-	return tinfoil.NewClientWithOptions(
-		tinfoil.WithAttestationBundleURL(vlmAttestationURL),
-		tinfoil.WithTransport(tinfoil.TransportTLS),
-		tinfoil.WithOpenAIOptions(option.WithAPIKey(vlmKey)),
+func newTinfoilClient() (*tinfoil.RouterOpenAIClient, error) {
+	// The SDK takes the router list from ATC and verifies the first router
+	// whose attestation passes, then pins TLS to that router's attested key,
+	// so headers and status codes are protected along with every body.
+	return tinfoil.NewRouterOpenAIClient(context.Background(),
+		&tinfoil.RouterOptions{TransportMode: tinfoil.TransportModeTLS},
+		option.WithAPIKey(vlmKey),
 	)
 }
 
